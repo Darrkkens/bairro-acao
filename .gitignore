@@ -1,0 +1,14 @@
+.env
+.env.*
+!.env.example
+node_modules/
+frontend/dist/
+backend/server
+backend/data/
+data/
+*.test
+*.log
+.DS_Store
+.idea/
+.vscode/
+*.swp

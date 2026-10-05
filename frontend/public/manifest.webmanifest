@@ -1,0 +1,12 @@
+{
+  "name": "Bairro em Ação",
+  "short_name": "Bairro em Ação",
+  "description": "Registre problemas do bairro caminhando; a IA aberta organiza o relatório.",
+  "lang": "pt-BR",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#f4f6f0",
+  "theme_color": "#f4f6f0",
+  "icons": [{ "src": "/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }]
+}
