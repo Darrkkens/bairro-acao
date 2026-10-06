@@ -32,6 +32,8 @@ export function AIChip({ occurrence: o }: { occurrence: Occurrence }) {
       return <span className="chip warn">IA pediu detalhes</span>
     case 'failed':
       return <span className="chip danger">Falha na análise</span>
+    case 'grouped':
+      return <span className="chip muted">Foto extra de um ponto</span>
   }
 }
 

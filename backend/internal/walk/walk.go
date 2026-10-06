@@ -94,6 +94,8 @@ const (
 	AIDone      AIStatus = "done"
 	AINeedsInfo AIStatus = "needs_info" // the photo was not enough; Suggestion.Question says what to add
 	AIFailed    AIStatus = "failed"
+	// AIGrouped marks an extra photo of a point: the point's analysis covers it.
+	AIGrouped AIStatus = "grouped"
 )
 
 // Suggestion is the AI's reading of one occurrence, kept apart from what the
@@ -128,6 +130,47 @@ type Occurrence struct {
 	Title       string     `json:"title"`
 	Description string     `json:"description"`
 	ReviewedAt  *time.Time `json:"reviewed_at"`
+	// GroupID is set on an extra photo of a point and names the point it belongs to.
+	GroupID string `json:"group_id,omitempty"`
+	// Duplicate marks a near-identical shot grouped automatically before analysis.
+	Duplicate bool `json:"duplicate,omitempty"`
+	// SuggestedGroup is computed on read: an earlier point this one probably shows again.
+	SuggestedGroup *GroupSuggestion `json:"suggested_group,omitempty"`
+	// KeepSeparate records that the person said this is a different problem.
+	KeepSeparate bool `json:"-"`
+	// Signature describes the photo for duplicate and similarity checks (internal/similarity).
+	Signature []byte `json:"-"`
+	// Embedding is the photo's CLIP vector (internal/vision), when the model is set up.
+	Embedding []float32 `json:"-"`
+}
+
+// Inspection is what the image model says about an upload before Gemma sees it.
+type Inspection struct {
+	Embedding []float32
+	// Relevant is false for photos that show nothing the app reports (a car, a profile picture).
+	Relevant bool
+	Problem  float64
+	// Looks is the closest description in Portuguese, e.g. "um carro".
+	Looks string
+}
+
+// DiscardedError rejects an upload that shows nothing the app reports. The
+// photo is not stored and never reaches Gemma.
+type DiscardedError struct {
+	Looks   string
+	Problem float64
+}
+
+func (e *DiscardedError) Error() string {
+	return "Foto descartada: parece " + e.Looks + ", não um problema em espaço público."
+}
+
+// GroupSuggestion explains why two points look like the same problem.
+type GroupSuggestion struct {
+	ID         string  `json:"id"`
+	DistanceM  float64 `json:"distance_m"`
+	Seconds    float64 `json:"seconds"`
+	Similarity float64 `json:"similarity"`
 }
 
 // Review is the person's confirmation or correction of an occurrence.

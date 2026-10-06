@@ -1,5 +1,14 @@
 import type { Health, LocalOccurrence, Occurrence, Review, TrackPoint, Walk, WalkDetail, WalkSummary } from './types'
 
+export interface DiscardedUpload {
+  discarded: true
+  looks: string
+  message: string
+}
+
+export const isDiscarded = (result: unknown): result is DiscardedUpload => typeof result === 'object' && result !== null && (result as DiscardedUpload).discarded === true
+
+
 const base = (import.meta.env.VITE_API_URL ?? '').replace(/\/$/, '')
 
 export class ApiError extends Error {
@@ -50,11 +59,15 @@ export const api = {
       form.set('longitude', String(o.location.longitude))
       if (o.location.accuracy_m !== undefined) form.set('accuracy_m', String(o.location.accuracy_m))
     }
-    return request<Occurrence>(`/walks/${o.walk_id}/occurrences/${o.id}`, { method: 'PUT', body: form })
+    // The server may discard an off-topic photo (a car, a profile picture) instead of storing it.
+    return request<Occurrence | DiscardedUpload>(`/walks/${o.walk_id}/occurrences/${o.id}`, { method: 'PUT', body: form })
   },
   review: (id: string, r: Review) => request<Occurrence>(`/occurrences/${id}`, json('PATCH', r)),
   reanalyze: (id: string, note: string) => request<Occurrence>(`/occurrences/${id}/analyze`, json('POST', { note })),
   remove: (id: string) => request<void>(`/occurrences/${id}`, { method: 'DELETE' }),
+  group: (id: string, withId: string) => request<void>(`/occurrences/${id}/group`, json('POST', { with: withId })),
+  ungroup: (id: string) => request<void>(`/occurrences/${id}/ungroup`, { method: 'POST' }),
+  keepSeparate: (id: string) => request<void>(`/occurrences/${id}/keep-separate`, { method: 'POST' }),
   neighborhoods: (code: string, city: string) => request<{ names: string[]; fetched_at: string }>(`/places/neighborhoods/${code}?city=${encodeURIComponent(city)}`),
   photoURL: (name: string) => `${base}/api/photos/${encodeURIComponent(name)}`,
   reportURL: (id: string, download = false) => `${base}/api/walks/${id}/report.html${download ? '?download' : ''}`,

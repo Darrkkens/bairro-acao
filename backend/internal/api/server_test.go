@@ -8,6 +8,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"image"
+	"image/color"
+	"image/jpeg"
 	"io"
 	"mime/multipart"
 	"net/http"
@@ -27,6 +30,20 @@ func (aiStub) Healthy(context.Context) bool { return true }
 
 // newServer runs against TEST_DATABASE_URL inside a throwaway schema.
 func newServer(t *testing.T) (http.Handler, *store.Postgres, *int) {
+	return newServerWithVision(t, nil)
+}
+
+// visionStub answers like the image model, keyed by the photo bytes.
+type visionStub map[string]walk.Inspection
+
+func (v visionStub) Inspect(photo []byte) (walk.Inspection, error) {
+	if got, ok := v[string(photo)]; ok {
+		return got, nil
+	}
+	return walk.Inspection{Relevant: true, Embedding: []float32{1, 0, 0}}, nil
+}
+
+func newServerWithVision(t *testing.T, vision walk.Inspector) (http.Handler, *store.Postgres, *int) {
 	t.Helper()
 	url := os.Getenv("TEST_DATABASE_URL")
 	if url == "" {
@@ -60,6 +77,9 @@ func newServer(t *testing.T) (http.Handler, *store.Postgres, *int) {
 	}
 	wakes := new(int)
 	service := &walk.Service{Repo: db, Photos: dir, Wake: func() { *wakes++ }}
+	if vision != nil {
+		service.Vision = vision
+	}
 	return New(Config{Walks: service, Photos: dir, AI: aiStub{}, Database: db, Location: time.UTC}), db, wakes
 }
 
@@ -194,5 +214,145 @@ func TestRejectsBadInput(t *testing.T) {
 		if rec := do(t, h, c.method, c.path, c.contentType, strings.NewReader(c.body)); rec.Code < 400 || rec.Code >= 500 {
 			t.Errorf("%s %s %s: got %d", c.method, c.path, c.body, rec.Code)
 		}
+	}
+}
+
+func testJPEG(t *testing.T, seed int) []byte { return testJPEGShifted(t, seed, 0) }
+
+// testJPEGShifted draws the same pattern moved sideways: a similar but not identical photo.
+func testJPEGShifted(t *testing.T, seed, shift int) []byte {
+	t.Helper()
+	img := image.NewRGBA(image.Rect(0, 0, 320, 240))
+	for y := range 240 {
+		for x := range 320 {
+			v := uint8(((x+shift)*seed + y*7) % 200)
+			img.Set(x, y, color.RGBA{v, uint8(255 - v), uint8(seed * 30), 255})
+		}
+	}
+	var buf bytes.Buffer
+	if err := jpeg.Encode(&buf, img, nil); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
+}
+
+func TestRepeatedPhotoIsGroupedWithoutAnalysis(t *testing.T) {
+	h, _, wakes := newServer(t)
+	walkID, other := "6a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d", "7b2c3d4e-5f6a-4b7c-8d9e-0f1a2b3c4d5e"
+	first, second := "11111111-2222-4333-8444-555555555555", "22222222-3333-4444-8555-666666666666"
+	now := time.Now().UTC().Format(time.RFC3339)
+	for _, id := range []string{walkID, other} {
+		body := `{"neighborhood":"Centro","city":"Joaçaba","state":"SC","started_at":"` + now + `"}`
+		if rec := do(t, h, http.MethodPut, "/api/walks/"+id, "application/json", strings.NewReader(body)); rec.Code != http.StatusCreated {
+			t.Fatalf("walk: %d %s", rec.Code, rec.Body)
+		}
+	}
+	photo := testJPEG(t, 3)
+	fields := map[string]string{"note": "Calçada quebrada", "captured_at": now, "latitude": "-27.16776", "longitude": "-51.51792"}
+	if rec := upload(t, h, walkID, first, photo, fields); rec.Code != http.StatusCreated {
+		t.Fatalf("first: %d %s", rec.Code, rec.Body)
+	}
+	rec := upload(t, h, walkID, second, photo, fields)
+	var repeated walk.Occurrence
+	if rec.Code != http.StatusCreated || json.Unmarshal(rec.Body.Bytes(), &repeated) != nil {
+		t.Fatalf("second: %d %s", rec.Code, rec.Body)
+	}
+	if repeated.AIStatus != walk.AIGrouped || repeated.GroupID != first || !repeated.Duplicate || *wakes != 1 {
+		t.Fatalf("the repeated photo must join the first point without waking the AI: %+v, wakes %d", repeated, *wakes)
+	}
+
+	occurrence := func(id string) walk.Occurrence {
+		var got struct {
+			Occurrences []walk.Occurrence `json:"occurrences"`
+		}
+		rec := do(t, h, http.MethodGet, "/api/walks/"+walkID, "", nil)
+		_ = json.Unmarshal(rec.Body.Bytes(), &got)
+		for _, o := range got.Occurrences {
+			if o.ID == id {
+				return o
+			}
+		}
+		t.Fatalf("%s missing", id)
+		return walk.Occurrence{}
+	}
+
+	if rec := do(t, h, http.MethodPost, "/api/occurrences/"+second+"/ungroup", "", nil); rec.Code != http.StatusNoContent || *wakes != 2 {
+		t.Fatalf("ungroup: %d wakes %d", rec.Code, *wakes)
+	}
+	if o := occurrence(second); o.GroupID != "" || o.AIStatus != walk.AIPending {
+		t.Fatalf("after ungroup: %+v", o)
+	}
+	if rec := do(t, h, http.MethodPost, "/api/occurrences/"+second+"/group", "application/json", strings.NewReader(`{"with":"`+first+`"}`)); rec.Code != http.StatusNoContent {
+		t.Fatalf("group: %d %s", rec.Code, rec.Body)
+	}
+	if o := occurrence(second); o.GroupID != first || o.AIStatus != walk.AIGrouped {
+		t.Fatalf("after group: %+v", o)
+	}
+
+	// A point from another walk cannot be grouped in.
+	elsewhere := "33333333-4444-4555-8666-777777777777"
+	if rec := upload(t, h, other, elsewhere, testJPEG(t, 5), fields); rec.Code != http.StatusCreated {
+		t.Fatalf("other walk: %d", rec.Code)
+	}
+	if rec := do(t, h, http.MethodPost, "/api/occurrences/"+elsewhere+"/group", "application/json", strings.NewReader(`{"with":"`+first+`"}`)); rec.Code != http.StatusBadRequest {
+		t.Fatalf("cross-walk group: %d", rec.Code)
+	}
+
+	// Deleting the point removes its extra photos too.
+	if rec := do(t, h, http.MethodDelete, "/api/occurrences/"+first, "", nil); rec.Code != http.StatusNoContent {
+		t.Fatalf("delete: %d", rec.Code)
+	}
+	for _, id := range []string{first, second} {
+		if rec := do(t, h, http.MethodGet, "/api/photos/"+id+".jpg", "", nil); rec.Code != http.StatusNotFound {
+			t.Errorf("photo %s still served after delete: %d", id, rec.Code)
+		}
+	}
+}
+
+func TestImageModelDiscardsAndGroupsBeforeAnalysis(t *testing.T) {
+	// Another shot of the same spot: a similar picture, not the same file (that would be a repeat).
+	avatar, sidewalk, sidewalkAgain, elsewhere := testJPEG(t, 1), testJPEG(t, 2), testJPEGShifted(t, 2, 37), testJPEGShifted(t, 2, 71)
+	stub := visionStub{
+		string(avatar):        {Relevant: false, Looks: "um avatar ou ícone", Problem: 0.01},
+		string(sidewalk):      {Relevant: true, Embedding: []float32{1, 0, 0}},
+		string(sidewalkAgain): {Relevant: true, Embedding: []float32{0.95, 0.312, 0}},
+		string(elsewhere):     {Relevant: true, Embedding: []float32{0.95, 0.312, 0}},
+	}
+	h, _, wakes := newServerWithVision(t, stub)
+	walkID := "8c1d2e3f-4a5b-4c6d-8e7f-9a0b1c2d3e4f"
+	now := time.Now().UTC()
+	start := `{"neighborhood":"Frei Bruno","city":"Joaçaba","state":"SC","started_at":"` + now.Format(time.RFC3339) + `"}`
+	if rec := do(t, h, http.MethodPut, "/api/walks/"+walkID, "application/json", strings.NewReader(start)); rec.Code != http.StatusCreated {
+		t.Fatalf("walk: %d", rec.Code)
+	}
+	at := func(seconds int, lat string) map[string]string {
+		return map[string]string{"note": "Lixo acumulado", "captured_at": now.Add(time.Duration(seconds) * time.Second).Format(time.RFC3339), "latitude": lat, "longitude": "-51.51792", "accuracy_m": "20"}
+	}
+
+	rec := upload(t, h, walkID, "aaaaaaaa-0000-4000-8000-000000000001", avatar, at(0, "-27.16776"))
+	var discarded struct {
+		Discarded bool   `json:"discarded"`
+		Looks     string `json:"looks"`
+	}
+	if rec.Code != http.StatusOK || json.Unmarshal(rec.Body.Bytes(), &discarded) != nil || !discarded.Discarded || discarded.Looks != "um avatar ou ícone" || *wakes != 0 {
+		t.Fatalf("avatar: %d %s, wakes %d", rec.Code, rec.Body, *wakes)
+	}
+	if rec := do(t, h, http.MethodGet, "/api/photos/aaaaaaaa-0000-4000-8000-000000000001.jpg", "", nil); rec.Code != http.StatusNotFound {
+		t.Fatalf("a discarded photo must not be stored: %d", rec.Code)
+	}
+
+	first := "aaaaaaaa-0000-4000-8000-000000000002"
+	if rec := upload(t, h, walkID, first, sidewalk, at(0, "-27.16776")); rec.Code != http.StatusCreated || *wakes != 1 {
+		t.Fatalf("first: %d wakes %d", rec.Code, *wakes)
+	}
+	var again walk.Occurrence
+	rec = upload(t, h, walkID, "aaaaaaaa-0000-4000-8000-000000000003", sidewalkAgain, at(13, "-27.16773"))
+	if json.Unmarshal(rec.Body.Bytes(), &again) != nil || again.GroupID != first || again.AIStatus != walk.AIGrouped || again.Duplicate || *wakes != 1 {
+		t.Fatalf("another shot of the same spot must join it without analysis: %+v, wakes %d", again, *wakes)
+	}
+	var far walk.Occurrence
+	rec = upload(t, h, walkID, "aaaaaaaa-0000-4000-8000-000000000004", elsewhere, at(20, "-27.16700"))
+	if json.Unmarshal(rec.Body.Bytes(), &far) != nil || far.GroupID != "" || far.AIStatus != walk.AIPending || *wakes != 2 {
+		t.Fatalf("a similar photo 85 m away is its own point: %+v, wakes %d", far, *wakes)
 	}
 }

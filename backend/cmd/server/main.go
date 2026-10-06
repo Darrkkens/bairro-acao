@@ -10,6 +10,7 @@ import (
 	"bairroacao/internal/store"
 	"bairroacao/internal/tiles"
 	"bairroacao/internal/tlscert"
+	"bairroacao/internal/vision"
 	"bairroacao/internal/walk"
 	"bairroacao/internal/web"
 	"context"
@@ -89,6 +90,17 @@ func run() error {
 
 	worker := analyzer.New(db, model, photoDir)
 	walks := &walk.Service{Repo: db, Photos: photoDir, Wake: worker.Wake}
+	// Image model (CLIP via ONNX Runtime) that discards off-topic photos and groups
+	// repeated shots before Gemma. Optional: without its files the app works unfiltered.
+	if env("VISION", "on") != "off" {
+		if inspector, err := vision.OpenDir(env("VISION_DIR", "data/vision")); err != nil {
+			slog.Warn("photo filter disabled", "reason", err)
+		} else {
+			defer inspector.Close()
+			walks.Vision = inspector
+			slog.Info("photo filter enabled", "model", vision.ModelFile)
+		}
+	}
 	var handler http.Handler = api.New(api.Config{
 		Walks: walks, Neighborhoods: overpass, Photos: photoDir, Tiles: tileSource, AI: model, Database: db, Location: location,
 		Origins: strings.Split(env("CORS_ORIGINS", "http://localhost:5174,http://127.0.0.1:5174"), ","),
@@ -114,6 +126,9 @@ func run() error {
 		slog.Warn("serving plain HTTP beyond this computer; phones block location and offline use without HTTPS (set TLS=auto)")
 	}
 	server := &http.Server{Addr: addr, Handler: handler, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 2 * time.Minute, WriteTimeout: 2 * time.Minute, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 16 << 10}
+
+	// Photos stored before grouping existed get their signature in the background.
+	go walks.BackfillFeatures(ctx)
 
 	workerDone := make(chan struct{})
 	go func() {

@@ -41,7 +41,8 @@ export function ReportScreen({ id }: { id: string }) {
   }, [id, loaded, finishedAt])
 
   const replace = (o: Occurrence) => setData((d) => d && { ...d, occurrences: d.occurrences.map((x) => (x.id === o.id ? o : x)) })
-  const drop = (occurrenceId: string) => setData((d) => d && { ...d, occurrences: d.occurrences.filter((x) => x.id !== occurrenceId) })
+  // Removing a point removes its extra photos too.
+  const drop = (occurrenceId: string) => setData((d) => d && { ...d, occurrences: d.occurrences.filter((x) => x.id !== occurrenceId && x.group_id !== occurrenceId) })
 
   const top = (
     <header className="bar">
@@ -88,11 +89,15 @@ export function ReportScreen({ id }: { id: string }) {
     )
   }
 
-  const total = data.occurrences.length
-  const reviewed = data.occurrences.filter((o) => o.reviewed_at).length
+  // Extra photos of a point are shown inside its card, not as points of their own.
+  const points = topLevel(data)
+  const extras = extrasByPoint(data)
+  const numbers = new Map(points.map((o, i) => [o.id, i + 1]))
+  const total = points.length
+  const reviewed = points.filter((o) => o.reviewed_at).length
   const end = data.finished_at ? Date.parse(data.finished_at) : now
   const route = routeOf(track ?? [], data.occurrences)
-  const located = data.occurrences.filter((o) => o.location).length
+  const located = points.filter((o) => o.location).length
 
   return (
     <main className="screen report">
@@ -139,7 +144,7 @@ export function ReportScreen({ id }: { id: string }) {
             </p>
           </div>
           <ErrorBoundary fallback={<p className="banner warn">Não foi possível mostrar o mapa. Os pontos continuam abaixo e no relatório.</p>}>
-            <WalkMap occurrences={data.occurrences} track={track} />
+            <WalkMap occurrences={points} track={track} />
           </ErrorBoundary>
           <p className="map-note">
             {track.length === 0 ? 'Sem trajeto gravado pelo GPS: a linha liga os pontos fotografados. ' : ''}
@@ -149,8 +154,17 @@ export function ReportScreen({ id }: { id: string }) {
       )}
 
       <section className="review-list" aria-label="Pontos para revisar">
-        {data.occurrences.map((o, i) => (
-          <ReviewCard key={o.id} index={i + 1} occurrence={o} onChange={replace} onRemove={drop} />
+        {points.map((o, i) => (
+          <ReviewCard
+            key={o.id}
+            index={i + 1}
+            occurrence={o}
+            extras={extras.get(o.id) ?? []}
+            suggestedNumber={o.suggested_group ? numbers.get(o.suggested_group.id) : undefined}
+            onChange={replace}
+            onRemove={drop}
+            onRegroup={() => void reload()}
+          />
         ))}
       </section>
 
@@ -159,8 +173,18 @@ export function ReportScreen({ id }: { id: string }) {
   )
 }
 
+function topLevel(walk: WalkDetail): Occurrence[] {
+  return walk.occurrences.filter((o) => !o.group_id)
+}
+
+function extrasByPoint(walk: WalkDetail): Map<string, Occurrence[]> {
+  const map = new Map<string, Occurrence[]>()
+  for (const o of walk.occurrences) if (o.group_id) map.set(o.group_id, [...(map.get(o.group_id) ?? []), o])
+  return map
+}
+
 function summaryText(walk: WalkDetail): string {
-  const confirmed = walk.occurrences.filter((o) => o.reviewed_at)
+  const confirmed = topLevel(walk).filter((o) => o.reviewed_at)
   const where = walk.city ? `${walk.neighborhood}, ${placeLabel(walk)}` : walk.neighborhood
   const lines = [`Bairro em Ação: caminhada em ${where}, ${formatDate(walk.started_at)}.`, `${plural(confirmed.length, 'problema registrado', 'problemas registrados')}:`, '']
   for (const c of categories) {
@@ -174,7 +198,7 @@ function summaryText(walk: WalkDetail): string {
 }
 
 function ReportPanel({ walk, reviewed, total }: { walk: WalkDetail; reviewed: number; total: number }) {
-  const confirmed = walk.occurrences.filter((o) => o.reviewed_at)
+  const confirmed = topLevel(walk).filter((o) => o.reviewed_at)
   const counts = categories.map((c) => ({ ...c, n: confirmed.filter((o) => o.category === c.id).length })).filter((c) => c.n > 0)
   const compared = confirmed.filter((o) => o.ai)
   const matched = compared.filter((o) => o.ai?.category === o.category).length

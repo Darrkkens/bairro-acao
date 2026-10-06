@@ -1,7 +1,7 @@
 import { useEffect, useId, useState, type FormEvent } from 'react'
 import { api, ApiError } from '../api'
 import { categories } from '../categories'
-import { formatTime, mapURL } from '../format'
+import { formatTime, mapURL, plural } from '../format'
 import { CheckIcon, PencilIcon, PinIcon, RetryIcon, SparkIcon, TrashIcon } from '../icons'
 import type { CategoryId, Occurrence, Review, Suggestion } from '../types'
 import { CategoryChip, Spinner } from './Status'
@@ -11,11 +11,17 @@ const confidenceLabel = { alta: 'alta', media: 'média', baixa: 'baixa' }
 interface Props {
   index: number
   occurrence: Occurrence
+  /** Extra photos of this point. */
+  extras: Occurrence[]
+  /** Number of the point this one probably repeats, when grouping is suggested. */
+  suggestedNumber?: number
   onChange: (o: Occurrence) => void
   onRemove: (id: string) => void
+  /** Grouping changed which cards exist: reload the walk. */
+  onRegroup: () => void
 }
 
-export function ReviewCard({ index, occurrence: o, onChange, onRemove }: Props) {
+export function ReviewCard({ index, occurrence: o, extras, suggestedNumber, onChange, onRemove, onRegroup }: Props) {
   const reviewed = o.reviewed_at !== null
   const [editing, setEditing] = useState(false)
   const [manual, setManual] = useState(false)
@@ -114,6 +120,7 @@ export function ReviewCard({ index, occurrence: o, onChange, onRemove }: Props) 
           )}
         </p>
       </div>
+      <GroupSection occurrence={o} extras={extras} suggestedNumber={suggestedNumber} onRegroup={onRegroup} />
       <div className="review-body">
         {o.note && !(reviewed && !editing) && <p className="note">“{o.note}”</p>}
         {body}
@@ -124,7 +131,7 @@ export function ReviewCard({ index, occurrence: o, onChange, onRemove }: Props) 
         )}
         {!(reviewed && !editing) && (
           <button className={`link-button danger${confirmDelete ? ' armed' : ''}`} disabled={busy} onClick={() => (confirmDelete ? void remove() : setConfirmDelete(true))}>
-            <TrashIcon width={16} height={16} /> {confirmDelete ? 'Toque de novo para excluir' : 'Excluir ponto'}
+            <TrashIcon width={16} height={16} /> {confirmDelete ? 'Toque de novo para excluir' : extras.length > 0 ? `Excluir ponto (${plural(extras.length + 1, 'foto', 'fotos')})` : 'Excluir ponto'}
           </button>
         )}
       </div>
@@ -264,5 +271,77 @@ function ReviewForm({ initial, suggestion, busy, onSubmit, onCancel }: { initial
         )}
       </div>
     </form>
+  )
+}
+
+/** Extra photos of the point, and the suggestion to join an earlier point. */
+function GroupSection({ occurrence: o, extras, suggestedNumber, onRegroup }: { occurrence: Occurrence; extras: Occurrence[]; suggestedNumber?: number; onRegroup: () => void }) {
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+  const [armed, setArmed] = useState('')
+  const suggestion = o.suggested_group && suggestedNumber ? o.suggested_group : null
+  if (!suggestion && extras.length === 0) return null
+
+  async function act(action: () => Promise<void>) {
+    setBusy(true)
+    setError('')
+    try {
+      await action()
+      onRegroup()
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : 'Algo deu errado. Tente de novo.')
+    } finally {
+      setBusy(false)
+      setArmed('')
+    }
+  }
+
+  return (
+    <div className="group-section">
+      {suggestion && (
+        <div className="group-suggestion" role="status">
+          <p>
+            <strong>Parece o mesmo ponto que o nº {suggestedNumber}.</strong> Mesma categoria, a {suggestion.distance_m} m e {suggestion.seconds} s de distância, e as fotos são
+            parecidas.
+          </p>
+          <div className="form-actions">
+            <button className="button secondary small" disabled={busy} onClick={() => void act(() => api.group(o.id, suggestion.id))}>
+              Agrupar com o nº {suggestedNumber}
+            </button>
+            <button className="button ghost small" disabled={busy} onClick={() => void act(() => api.keepSeparate(o.id))}>
+              São diferentes
+            </button>
+          </div>
+        </div>
+      )}
+      {extras.length > 0 && (
+        <div className="extras">
+          <p className="extras-title">{plural(extras.length + 1, 'foto', 'fotos')} deste ponto</p>
+          <ul>
+            {extras.map((x) => (
+              <li key={x.id}>
+                <a href={api.photoURL(x.photo)} target="_blank" rel="noopener">
+                  <img src={api.photoURL(x.photo)} alt="Outra foto do mesmo ponto" loading="lazy" />
+                </a>
+                {x.duplicate && <span className="tag extra-tag">repetida</span>}
+                <div className="extra-actions">
+                  <button className="link-button" disabled={busy} onClick={() => void act(() => api.ungroup(x.id))}>
+                    Separar
+                  </button>
+                  <button className={`link-button danger${armed === x.id ? ' armed' : ''}`} disabled={busy} onClick={() => (armed === x.id ? void act(() => api.remove(x.id)) : setArmed(x.id))}>
+                    {armed === x.id ? 'Confirmar' : 'Remover'}
+                  </button>
+                </div>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+      {error && (
+        <p className="field-error" role="alert">
+          {error}
+        </p>
+      )}
+    </div>
   )
 }

@@ -24,10 +24,11 @@ type Section struct {
 	Items []Item
 }
 
-// Item is a confirmed occurrence with its number on the map.
+// Item is a confirmed point with its number on the map and its extra photos.
 type Item struct {
 	walk.Occurrence
 	Number int
+	Extra  []walk.Occurrence
 }
 
 type Report struct {
@@ -48,19 +49,27 @@ type Report struct {
 // Build keeps only occurrences the person reviewed, grouped in category order
 // and numbered in the order they were photographed.
 func Build(w walk.Walk, occurrences []walk.Occurrence, track []walk.TrackPoint, now time.Time) Report {
-	r := Report{Walk: w, GeneratedAt: now, Recorded: len(occurrences)}
+	r := Report{Walk: w, GeneratedAt: now}
 	r.Route = walk.Route(track, occurrences)
+	extras := map[string][]walk.Occurrence{}
+	for _, o := range occurrences {
+		if o.GroupID != "" {
+			extras[o.GroupID] = append(extras[o.GroupID], o)
+		} else {
+			r.Recorded++
+		}
+	}
 	r.Distance = walk.RouteLength(r.Route)
 	byCategory := map[walk.Category][]Item{}
 	models := map[string]bool{}
 	ordered := slices.Clone(occurrences)
 	slices.SortStableFunc(ordered, func(a, b walk.Occurrence) int { return a.CapturedAt.Compare(b.CapturedAt) })
 	for _, o := range ordered {
-		if o.ReviewedAt == nil {
+		if o.ReviewedAt == nil || o.GroupID != "" {
 			continue
 		}
 		r.Confirmed++
-		byCategory[o.Category] = append(byCategory[o.Category], Item{o, r.Confirmed})
+		byCategory[o.Category] = append(byCategory[o.Category], Item{o, r.Confirmed, extras[o.ID]})
 		if o.AI != nil {
 			r.AICompared++
 			if o.AI.Category == o.Category {
@@ -131,12 +140,14 @@ var source string
 func WriteHTML(out io.Writer, r Report, store interface{ Read(string) ([]byte, error) }, loc *time.Location) error {
 	images := map[string]template.URL{}
 	for _, s := range r.Sections {
-		for _, o := range s.Items {
-			data, err := store.Read(o.Photo)
-			if err != nil {
-				continue // the card renders without the image
+		for _, item := range s.Items {
+			for _, o := range append([]walk.Occurrence{item.Occurrence}, item.Extra...) {
+				data, err := store.Read(o.Photo)
+				if err != nil {
+					continue // the card renders without the image
+				}
+				images[o.Photo] = template.URL("data:" + photos.ContentType(o.Photo) + ";base64," + base64.StdEncoding.EncodeToString(data))
 			}
-			images[o.Photo] = template.URL("data:" + photos.ContentType(o.Photo) + ";base64," + base64.StdEncoding.EncodeToString(data))
 		}
 	}
 	tmpl, err := template.New("report").Funcs(template.FuncMap{

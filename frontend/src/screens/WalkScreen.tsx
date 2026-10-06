@@ -3,10 +3,11 @@ import { api } from '../api'
 import { Autocomplete, type Results } from '../components/Autocomplete'
 import { CaptureButton } from '../components/CaptureButton'
 import { AIChip, Spinner } from '../components/Status'
-import { formatClock, formatShortDate, plural } from '../format'
+import { formatClock, formatShortDate, formatTime, plural } from '../format'
 import { formatDistance, locate } from '../geo'
 import { useNow, useObjectURL, useOnline, useWalkDetail } from '../hooks'
 import { CameraIcon, PinIcon, RetryIcon } from '../icons'
+import { useDiscarded } from '../discarded'
 import { discard, useOutbox, type Op } from '../outbox'
 import { confirmCity, DEFAULT_PLACE, listNeighborhoods, matchesWords, normalize, reverseGeocode, searchCities, searchNeighborhoods, STATES, type City, type Neighborhood, type Place } from '../places'
 import type { GpsState } from '../track'
@@ -473,6 +474,7 @@ const gpsText: Partial<Record<GpsState, string>> = {
 
 function ActiveWalk({ walk, tracker, onPhoto, onFinish }: { walk: Walk; tracker: Props['tracker']; onPhoto: Props['onPhoto']; onFinish: Props['onFinish'] }) {
   const ops = useOutbox()
+  const [discarded, dismissDiscarded] = useDiscarded(walk.id)
   const { data } = useWalkDetail(walk.id)
   const now = useNow()
   const online = useOnline()
@@ -484,8 +486,12 @@ function ActiveWalk({ walk, tracker, onPhoto, onFinish }: { walk: Walk; tracker:
     return () => clearTimeout(timer)
   }, [confirming])
 
-  const remote = data?.occurrences ?? []
-  const stored = new Set(remote.map((o) => o.id))
+  const all = data?.occurrences ?? []
+  // Extra photos of a point (repeated shots) count under that point.
+  const remote = all.filter((o) => !o.group_id)
+  const extraCount = new Map<string, number>()
+  for (const o of all) if (o.group_id) extraCount.set(o.group_id, (extraCount.get(o.group_id) ?? 0) + 1)
+  const stored = new Set(all.map((o) => o.id))
   const local = ops.filter((op): op is LocalOp => op.kind === 'occurrence' && op.occurrence.walk_id === walk.id && !stored.has(op.occurrence.id))
   const points: Point[] = [
     ...local.map((op): Point => ({ kind: 'local', op, at: op.occurrence.captured_at })),
@@ -522,9 +528,24 @@ function ActiveWalk({ walk, tracker, onPhoto, onFinish }: { walk: Walk; tracker:
       </CaptureButton>
       <p className="hint">Foto, uma palavra se quiser, e siga caminhando. A IA analisa em segundo plano e você revisa tudo no final, com o mapa do trajeto.</p>
 
+      {discarded.length > 0 && (
+        <ul className="discarded" aria-label="Fotos descartadas">
+          {discarded.map((d) => (
+            <li key={d.id} role="status">
+              <p>
+                <strong>Foto descartada às {formatTime(d.at)}:</strong> parece {d.looks}, não um problema em espaço público. Tire outra foto se quiser registrar o ponto.
+              </p>
+              <button className="button ghost small" onClick={() => dismissDiscarded(d.id)}>
+                Ok
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+
       {points.length > 0 && (
         <ol className="points" aria-label="Pontos desta caminhada">
-          {points.map((p) => (p.kind === 'local' ? <LocalPoint key={p.op.occurrence.id} op={p.op} /> : <RemotePoint key={p.occurrence.id} occurrence={p.occurrence} />))}
+          {points.map((p) => (p.kind === 'local' ? <LocalPoint key={p.op.occurrence.id} op={p.op} /> : <RemotePoint key={p.occurrence.id} occurrence={p.occurrence} extras={extraCount.get(p.occurrence.id) ?? 0} />))}
         </ol>
       )}
 
@@ -556,13 +577,16 @@ function LocalPoint({ op }: { op: LocalOp }) {
   )
 }
 
-function RemotePoint({ occurrence: o }: { occurrence: Occurrence }) {
+function RemotePoint({ occurrence: o, extras }: { occurrence: Occurrence; extras: number }) {
   return (
     <li className="point">
       <img src={api.photoURL(o.photo)} alt="" loading="lazy" />
       <div>
         <p className="point-title">{o.title || o.ai?.title || o.note || 'Sem observação'}</p>
-        <AIChip occurrence={o} />
+        <span className="point-chips">
+          <AIChip occurrence={o} />
+          {extras > 0 && <span className="chip muted">+{plural(extras, 'foto', 'fotos')}</span>}
+        </span>
       </div>
     </li>
   )

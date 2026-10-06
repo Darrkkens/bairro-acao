@@ -19,6 +19,8 @@
   article { display: grid; grid-template-columns: 200px 1fr; gap: 16px; padding: 16px 0; border-bottom: 1px solid var(--line); break-inside: avoid; }
   article img { width: 100%; aspect-ratio: 4 / 3; object-fit: cover; border-radius: 10px; background: var(--line); display: block; }
   article .nophoto { aspect-ratio: 4 / 3; border-radius: 10px; background: var(--line); }
+  .extras { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; margin-top: 6px; }
+  .extras img { aspect-ratio: 1; border-radius: 6px; }
   h3 { margin: 0 0 4px; font-size: 17px; line-height: 1.3; }
   article p { margin: 0 0 8px; }
   .details { color: var(--muted); font-size: 14px; margin: 0; }
@@ -68,7 +70,10 @@
   <h2>{{.Label}} <small>{{len .Items}} {{plural (len .Items) "ponto" "pontos"}}</small></h2>
   {{range .Items}}
   <article>
-    {{with photo .Photo}}<img src="{{.}}" alt="Foto do problema registrado">{{else}}<div class="nophoto"></div>{{end}}
+    <div>
+      {{with photo .Photo}}<img src="{{.}}" alt="Foto do problema registrado">{{else}}<div class="nophoto"></div>{{end}}
+      {{with .Extra}}<div class="extras">{{range .}}{{with photo .Photo}}<img src="{{.}}" alt="Outra foto do mesmo ponto">{{end}}{{end}}</div>{{end}}
+    </div>
     <div>
       <h3><span class="num">{{.Number}}</span>{{.Title}}</h3>
       {{with .Description}}<p>{{.}}</p>{{end}}

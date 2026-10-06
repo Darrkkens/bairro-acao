@@ -1,8 +1,10 @@
 package walk
 
 import (
+	"bairroacao/internal/similarity"
 	"context"
 	"errors"
+	"log/slog"
 	"time"
 )
 
@@ -19,7 +21,20 @@ type Repository interface {
 	AddOccurrence(context.Context, Occurrence) (Occurrence, bool, error)
 	Review(context.Context, string, Review, time.Time) (Occurrence, error)
 	Requeue(context.Context, string, string) (Occurrence, error)
-	DeleteOccurrence(context.Context, string) (string, error)
+	// DeleteOccurrence removes a point with its extra photos and returns their file names.
+	DeleteOccurrence(context.Context, string) ([]string, error)
+	Group(ctx context.Context, member, leader string) error
+	Ungroup(context.Context, string) (bool, error)
+	KeepSeparate(context.Context, string) error
+	// MissingFeatures lists occurrences without a photo signature, or without an
+	// embedding when withEmbedding is set.
+	MissingFeatures(ctx context.Context, withEmbedding bool) ([]Occurrence, error)
+	SaveFeatures(ctx context.Context, id string, signature []byte, embedding []float32) error
+}
+
+// Inspector runs the image model on uploads (see internal/vision).
+type Inspector interface {
+	Inspect(photo []byte) (Inspection, error)
 }
 
 // Job is an occurrence claimed by the analysis worker.
@@ -28,12 +43,15 @@ type Job struct{ ID, Photo, Note, Neighborhood string }
 // PhotoStore keeps the image files; the database stores only their names.
 type PhotoStore interface {
 	Save(name string, data []byte) error
+	Read(name string) ([]byte, error)
 	Remove(name string) error
 }
 
 type Service struct {
 	Repo   Repository
 	Photos PhotoStore
+	// Vision, when set, discards off-topic photos and groups repeated shots before Gemma.
+	Vision Inspector
 	// Wake tells the analysis worker that an occurrence is waiting.
 	Wake func()
 	Now  func() time.Time
@@ -86,6 +104,7 @@ func (s *Service) Walk(ctx context.Context, id string) (Walk, []Occurrence, erro
 		return Walk{}, nil, err
 	}
 	occurrences, err := s.Repo.Occurrences(ctx, id)
+	suggestGroups(occurrences)
 	return w, occurrences, err
 }
 
@@ -167,18 +186,139 @@ func (s *Service) Record(ctx context.Context, in NewOccurrence) (Occurrence, boo
 		return Occurrence{}, false, err
 	}
 	photo := id + "." + kind
+	o := Occurrence{ID: id, WalkID: walkID, Photo: photo, Note: note, Location: in.Location, CapturedAt: in.CapturedAt.UTC(), AIStatus: AIPending}
+	// Off-topic photos stop here: not stored, never analyzed.
+	if s.Vision != nil {
+		inspection, err := s.Vision.Inspect(in.Photo)
+		switch {
+		case err != nil:
+			slog.Warn("image model failed; photo goes to Gemma unfiltered", "occurrence", id, "error", err)
+		case !inspection.Relevant:
+			slog.Info("photo discarded before analysis", "occurrence", id, "looks", inspection.Looks, "problem", inspection.Problem)
+			return Occurrence{}, false, &DiscardedError{Looks: inspection.Looks, Problem: inspection.Problem}
+		default:
+			o.Embedding = inspection.Embedding
+		}
+	}
+	// A repeated shot, or another photo of the same spot taken moments later,
+	// joins the earlier point: Gemma analyzes the point once.
+	sig, sigErr := similarity.Compute(in.Photo)
+	if sigErr == nil {
+		o.Signature, _ = sig.MarshalBinary()
+		if existing, err := s.Repo.Occurrences(ctx, walkID); err == nil {
+			if leader, ok := duplicateOf(sig, o.CapturedAt, existing); ok {
+				o.GroupID, o.Duplicate, o.AIStatus = leader, true, AIGrouped
+			} else if leader, ok := sameScene(o, existing); ok {
+				o.GroupID, o.AIStatus = leader, AIGrouped
+			}
+		}
+	}
 	if err := s.Photos.Save(photo, in.Photo); err != nil {
 		return Occurrence{}, false, err
 	}
-	o, created, err := s.Repo.AddOccurrence(ctx, Occurrence{ID: id, WalkID: walkID, Photo: photo, Note: note, Location: in.Location, CapturedAt: in.CapturedAt.UTC(), AIStatus: AIPending})
+	saved, created, err := s.Repo.AddOccurrence(ctx, o)
 	if err != nil {
 		_ = s.Photos.Remove(photo)
 		return Occurrence{}, false, err
 	}
-	if created {
+	if created && saved.AIStatus == AIPending {
 		s.wake()
 	}
-	return o, created, nil
+	return saved, created, nil
+}
+
+// Group makes an occurrence an extra photo of another point. If the target is
+// itself an extra photo, its point is used; extras of the moved occurrence follow it.
+func (s *Service) Group(ctx context.Context, id, with string) error {
+	id, ok := NormalizeID(id)
+	with, withOK := NormalizeID(with)
+	if !ok || !withOK {
+		return ErrNotFound
+	}
+	member, err := s.Repo.Occurrence(ctx, id)
+	if err != nil {
+		return err
+	}
+	leader, err := s.Repo.Occurrence(ctx, with)
+	if err != nil {
+		return err
+	}
+	if leader.GroupID != "" {
+		if leader, err = s.Repo.Occurrence(ctx, leader.GroupID); err != nil {
+			return err
+		}
+	}
+	if leader.WalkID != member.WalkID || leader.ID == member.ID {
+		return invalid("Só dá para agrupar pontos diferentes da mesma caminhada.")
+	}
+	return s.Repo.Group(ctx, member.ID, leader.ID)
+}
+
+// Ungroup makes an extra photo a point of its own again, analyzed if it never was.
+func (s *Service) Ungroup(ctx context.Context, id string) error {
+	id, ok := NormalizeID(id)
+	if !ok {
+		return ErrNotFound
+	}
+	o, err := s.Repo.Occurrence(ctx, id)
+	if err != nil {
+		return err
+	}
+	if o.GroupID == "" {
+		return invalid("Esta foto já é um ponto separado.")
+	}
+	queued, err := s.Repo.Ungroup(ctx, id)
+	if err == nil && queued {
+		s.wake()
+	}
+	return err
+}
+
+// KeepSeparate records that a suggested grouping was wrong, so it is not offered again.
+func (s *Service) KeepSeparate(ctx context.Context, id string) error {
+	id, ok := NormalizeID(id)
+	if !ok {
+		return ErrNotFound
+	}
+	return s.Repo.KeepSeparate(ctx, id)
+}
+
+// BackfillFeatures describes photos stored before signatures or the image
+// model existed, so new photos can be grouped with them.
+func (s *Service) BackfillFeatures(ctx context.Context) {
+	missing, err := s.Repo.MissingFeatures(ctx, s.Vision != nil)
+	if err != nil {
+		slog.Warn("listing photos without features failed", "error", err)
+		return
+	}
+	done := 0
+	for _, o := range missing {
+		data, err := s.Photos.Read(o.Photo)
+		if err != nil {
+			continue
+		}
+		signature := o.Signature
+		if len(signature) == 0 {
+			if sig, err := similarity.Compute(data); err == nil {
+				signature, _ = sig.MarshalBinary()
+			}
+		}
+		embedding := o.Embedding
+		if len(embedding) == 0 && s.Vision != nil {
+			// Only the vector is needed here: an old photo is never discarded.
+			if inspection, err := s.Vision.Inspect(data); err == nil {
+				embedding = inspection.Embedding
+			}
+		}
+		if err := s.Repo.SaveFeatures(ctx, o.ID, signature, embedding); err != nil {
+			slog.Warn("saving photo features failed", "occurrence", o.ID, "error", err)
+			continue
+		}
+		done++
+	}
+	if done > 0 {
+		slog.Info("photo features computed", "count", done)
+	}
 }
 
 func (s *Service) Review(ctx context.Context, id string, r Review) (Occurrence, error) {
@@ -216,9 +356,14 @@ func (s *Service) Delete(ctx context.Context, id string) error {
 	if !ok {
 		return ErrNotFound
 	}
-	photo, err := s.Repo.DeleteOccurrence(ctx, id)
+	photos, err := s.Repo.DeleteOccurrence(ctx, id)
 	if err != nil {
 		return err
 	}
-	return s.Photos.Remove(photo)
+	for _, photo := range photos {
+		if err := s.Photos.Remove(photo); err != nil {
+			return err
+		}
+	}
+	return nil
 }
