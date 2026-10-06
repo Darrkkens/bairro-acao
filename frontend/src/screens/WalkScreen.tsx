@@ -484,8 +484,12 @@ function ActiveWalk({ walk, tracker, onPhoto, onFinish }: { walk: Walk; tracker:
     return () => clearTimeout(timer)
   }, [confirming])
 
-  const remote = data?.occurrences ?? []
-  const stored = new Set(remote.map((o) => o.id))
+  const all = data?.occurrences ?? []
+  // Extra photos of a point (repeated shots) count under that point.
+  const remote = all.filter((o) => !o.group_id)
+  const extraCount = new Map<string, number>()
+  for (const o of all) if (o.group_id) extraCount.set(o.group_id, (extraCount.get(o.group_id) ?? 0) + 1)
+  const stored = new Set(all.map((o) => o.id))
   const local = ops.filter((op): op is LocalOp => op.kind === 'occurrence' && op.occurrence.walk_id === walk.id && !stored.has(op.occurrence.id))
   const points: Point[] = [
     ...local.map((op): Point => ({ kind: 'local', op, at: op.occurrence.captured_at })),
@@ -524,7 +528,7 @@ function ActiveWalk({ walk, tracker, onPhoto, onFinish }: { walk: Walk; tracker:
 
       {points.length > 0 && (
         <ol className="points" aria-label="Pontos desta caminhada">
-          {points.map((p) => (p.kind === 'local' ? <LocalPoint key={p.op.occurrence.id} op={p.op} /> : <RemotePoint key={p.occurrence.id} occurrence={p.occurrence} />))}
+          {points.map((p) => (p.kind === 'local' ? <LocalPoint key={p.op.occurrence.id} op={p.op} /> : <RemotePoint key={p.occurrence.id} occurrence={p.occurrence} extras={extraCount.get(p.occurrence.id) ?? 0} />))}
         </ol>
       )}
 
@@ -556,13 +560,16 @@ function LocalPoint({ op }: { op: LocalOp }) {
   )
 }
 
-function RemotePoint({ occurrence: o }: { occurrence: Occurrence }) {
+function RemotePoint({ occurrence: o, extras }: { occurrence: Occurrence; extras: number }) {
   return (
     <li className="point">
       <img src={api.photoURL(o.photo)} alt="" loading="lazy" />
       <div>
         <p className="point-title">{o.title || o.ai?.title || o.note || 'Sem observação'}</p>
-        <AIChip occurrence={o} />
+        <span className="point-chips">
+          <AIChip occurrence={o} />
+          {extras > 0 && <span className="chip muted">+{plural(extras, 'foto', 'fotos')}</span>}
+        </span>
       </div>
     </li>
   )

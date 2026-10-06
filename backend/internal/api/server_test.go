@@ -8,6 +8,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"image"
+	"image/color"
+	"image/jpeg"
 	"io"
 	"mime/multipart"
 	"net/http"
@@ -193,6 +196,95 @@ func TestRejectsBadInput(t *testing.T) {
 	for _, c := range cases {
 		if rec := do(t, h, c.method, c.path, c.contentType, strings.NewReader(c.body)); rec.Code < 400 || rec.Code >= 500 {
 			t.Errorf("%s %s %s: got %d", c.method, c.path, c.body, rec.Code)
+		}
+	}
+}
+
+func testJPEG(t *testing.T, seed int) []byte {
+	t.Helper()
+	img := image.NewRGBA(image.Rect(0, 0, 320, 240))
+	for y := range 240 {
+		for x := range 320 {
+			v := uint8((x*seed + y*7) % 200)
+			img.Set(x, y, color.RGBA{v, uint8(255 - v), uint8(seed * 30), 255})
+		}
+	}
+	var buf bytes.Buffer
+	if err := jpeg.Encode(&buf, img, nil); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
+}
+
+func TestRepeatedPhotoIsGroupedWithoutAnalysis(t *testing.T) {
+	h, _, wakes := newServer(t)
+	walkID, other := "6a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d", "7b2c3d4e-5f6a-4b7c-8d9e-0f1a2b3c4d5e"
+	first, second := "11111111-2222-4333-8444-555555555555", "22222222-3333-4444-8555-666666666666"
+	now := time.Now().UTC().Format(time.RFC3339)
+	for _, id := range []string{walkID, other} {
+		body := `{"neighborhood":"Centro","city":"Joaçaba","state":"SC","started_at":"` + now + `"}`
+		if rec := do(t, h, http.MethodPut, "/api/walks/"+id, "application/json", strings.NewReader(body)); rec.Code != http.StatusCreated {
+			t.Fatalf("walk: %d %s", rec.Code, rec.Body)
+		}
+	}
+	photo := testJPEG(t, 3)
+	fields := map[string]string{"note": "Calçada quebrada", "captured_at": now, "latitude": "-27.16776", "longitude": "-51.51792"}
+	if rec := upload(t, h, walkID, first, photo, fields); rec.Code != http.StatusCreated {
+		t.Fatalf("first: %d %s", rec.Code, rec.Body)
+	}
+	rec := upload(t, h, walkID, second, photo, fields)
+	var repeated walk.Occurrence
+	if rec.Code != http.StatusCreated || json.Unmarshal(rec.Body.Bytes(), &repeated) != nil {
+		t.Fatalf("second: %d %s", rec.Code, rec.Body)
+	}
+	if repeated.AIStatus != walk.AIGrouped || repeated.GroupID != first || !repeated.Duplicate || *wakes != 1 {
+		t.Fatalf("the repeated photo must join the first point without waking the AI: %+v, wakes %d", repeated, *wakes)
+	}
+
+	occurrence := func(id string) walk.Occurrence {
+		var got struct {
+			Occurrences []walk.Occurrence `json:"occurrences"`
+		}
+		rec := do(t, h, http.MethodGet, "/api/walks/"+walkID, "", nil)
+		_ = json.Unmarshal(rec.Body.Bytes(), &got)
+		for _, o := range got.Occurrences {
+			if o.ID == id {
+				return o
+			}
+		}
+		t.Fatalf("%s missing", id)
+		return walk.Occurrence{}
+	}
+
+	if rec := do(t, h, http.MethodPost, "/api/occurrences/"+second+"/ungroup", "", nil); rec.Code != http.StatusNoContent || *wakes != 2 {
+		t.Fatalf("ungroup: %d wakes %d", rec.Code, *wakes)
+	}
+	if o := occurrence(second); o.GroupID != "" || o.AIStatus != walk.AIPending {
+		t.Fatalf("after ungroup: %+v", o)
+	}
+	if rec := do(t, h, http.MethodPost, "/api/occurrences/"+second+"/group", "application/json", strings.NewReader(`{"with":"`+first+`"}`)); rec.Code != http.StatusNoContent {
+		t.Fatalf("group: %d %s", rec.Code, rec.Body)
+	}
+	if o := occurrence(second); o.GroupID != first || o.AIStatus != walk.AIGrouped {
+		t.Fatalf("after group: %+v", o)
+	}
+
+	// A point from another walk cannot be grouped in.
+	elsewhere := "33333333-4444-4555-8666-777777777777"
+	if rec := upload(t, h, other, elsewhere, testJPEG(t, 5), fields); rec.Code != http.StatusCreated {
+		t.Fatalf("other walk: %d", rec.Code)
+	}
+	if rec := do(t, h, http.MethodPost, "/api/occurrences/"+elsewhere+"/group", "application/json", strings.NewReader(`{"with":"`+first+`"}`)); rec.Code != http.StatusBadRequest {
+		t.Fatalf("cross-walk group: %d", rec.Code)
+	}
+
+	// Deleting the point removes its extra photos too.
+	if rec := do(t, h, http.MethodDelete, "/api/occurrences/"+first, "", nil); rec.Code != http.StatusNoContent {
+		t.Fatalf("delete: %d", rec.Code)
+	}
+	for _, id := range []string{first, second} {
+		if rec := do(t, h, http.MethodGet, "/api/photos/"+id+".jpg", "", nil); rec.Code != http.StatusNotFound {
+			t.Errorf("photo %s still served after delete: %d", id, rec.Code)
 		}
 	}
 }

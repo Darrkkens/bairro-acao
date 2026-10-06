@@ -1,8 +1,10 @@
 package walk
 
 import (
+	"bairroacao/internal/similarity"
 	"context"
 	"errors"
+	"log/slog"
 	"time"
 )
 
@@ -19,7 +21,13 @@ type Repository interface {
 	AddOccurrence(context.Context, Occurrence) (Occurrence, bool, error)
 	Review(context.Context, string, Review, time.Time) (Occurrence, error)
 	Requeue(context.Context, string, string) (Occurrence, error)
-	DeleteOccurrence(context.Context, string) (string, error)
+	// DeleteOccurrence removes a point with its extra photos and returns their file names.
+	DeleteOccurrence(context.Context, string) ([]string, error)
+	Group(ctx context.Context, member, leader string) error
+	Ungroup(context.Context, string) (bool, error)
+	KeepSeparate(context.Context, string) error
+	MissingSignatures(context.Context) ([]Occurrence, error)
+	SaveSignature(context.Context, string, []byte) error
 }
 
 // Job is an occurrence claimed by the analysis worker.
@@ -28,6 +36,7 @@ type Job struct{ ID, Photo, Note, Neighborhood string }
 // PhotoStore keeps the image files; the database stores only their names.
 type PhotoStore interface {
 	Save(name string, data []byte) error
+	Read(name string) ([]byte, error)
 	Remove(name string) error
 }
 
@@ -86,6 +95,7 @@ func (s *Service) Walk(ctx context.Context, id string) (Walk, []Occurrence, erro
 		return Walk{}, nil, err
 	}
 	occurrences, err := s.Repo.Occurrences(ctx, id)
+	suggestGroups(occurrences)
 	return w, occurrences, err
 }
 
@@ -170,15 +180,107 @@ func (s *Service) Record(ctx context.Context, in NewOccurrence) (Occurrence, boo
 	if err := s.Photos.Save(photo, in.Photo); err != nil {
 		return Occurrence{}, false, err
 	}
-	o, created, err := s.Repo.AddOccurrence(ctx, Occurrence{ID: id, WalkID: walkID, Photo: photo, Note: note, Location: in.Location, CapturedAt: in.CapturedAt.UTC(), AIStatus: AIPending})
+	o := Occurrence{ID: id, WalkID: walkID, Photo: photo, Note: note, Location: in.Location, CapturedAt: in.CapturedAt.UTC(), AIStatus: AIPending}
+	// The same shot sent twice (or a burst) joins the earlier point and skips the AI.
+	if sig, err := similarity.Compute(in.Photo); err == nil {
+		o.Signature, _ = sig.MarshalBinary()
+		if existing, err := s.Repo.Occurrences(ctx, walkID); err == nil {
+			if leader, ok := duplicateOf(sig, o.CapturedAt, existing); ok {
+				o.GroupID, o.Duplicate, o.AIStatus = leader, true, AIGrouped
+			}
+		}
+	}
+	saved, created, err := s.Repo.AddOccurrence(ctx, o)
 	if err != nil {
 		_ = s.Photos.Remove(photo)
 		return Occurrence{}, false, err
 	}
-	if created {
+	if created && saved.AIStatus == AIPending {
 		s.wake()
 	}
-	return o, created, nil
+	return saved, created, nil
+}
+
+// Group makes an occurrence an extra photo of another point. If the target is
+// itself an extra photo, its point is used; extras of the moved occurrence follow it.
+func (s *Service) Group(ctx context.Context, id, with string) error {
+	id, ok := NormalizeID(id)
+	with, withOK := NormalizeID(with)
+	if !ok || !withOK {
+		return ErrNotFound
+	}
+	member, err := s.Repo.Occurrence(ctx, id)
+	if err != nil {
+		return err
+	}
+	leader, err := s.Repo.Occurrence(ctx, with)
+	if err != nil {
+		return err
+	}
+	if leader.GroupID != "" {
+		if leader, err = s.Repo.Occurrence(ctx, leader.GroupID); err != nil {
+			return err
+		}
+	}
+	if leader.WalkID != member.WalkID || leader.ID == member.ID {
+		return invalid("Só dá para agrupar pontos diferentes da mesma caminhada.")
+	}
+	return s.Repo.Group(ctx, member.ID, leader.ID)
+}
+
+// Ungroup makes an extra photo a point of its own again, analyzed if it never was.
+func (s *Service) Ungroup(ctx context.Context, id string) error {
+	id, ok := NormalizeID(id)
+	if !ok {
+		return ErrNotFound
+	}
+	o, err := s.Repo.Occurrence(ctx, id)
+	if err != nil {
+		return err
+	}
+	if o.GroupID == "" {
+		return invalid("Esta foto já é um ponto separado.")
+	}
+	queued, err := s.Repo.Ungroup(ctx, id)
+	if err == nil && queued {
+		s.wake()
+	}
+	return err
+}
+
+// KeepSeparate records that a suggested grouping was wrong, so it is not offered again.
+func (s *Service) KeepSeparate(ctx context.Context, id string) error {
+	id, ok := NormalizeID(id)
+	if !ok {
+		return ErrNotFound
+	}
+	return s.Repo.KeepSeparate(ctx, id)
+}
+
+// BackfillSignatures describes photos stored before grouping existed.
+func (s *Service) BackfillSignatures(ctx context.Context) {
+	missing, err := s.Repo.MissingSignatures(ctx)
+	if err != nil {
+		slog.Warn("listing photos without signature failed", "error", err)
+		return
+	}
+	for _, o := range missing {
+		data, err := s.Photos.Read(o.Photo)
+		if err != nil {
+			continue
+		}
+		sig, err := similarity.Compute(data)
+		if err != nil {
+			continue
+		}
+		raw, _ := sig.MarshalBinary()
+		if err := s.Repo.SaveSignature(ctx, o.ID, raw); err != nil {
+			slog.Warn("saving photo signature failed", "occurrence", o.ID, "error", err)
+		}
+	}
+	if len(missing) > 0 {
+		slog.Info("photo signatures computed", "count", len(missing))
+	}
 }
 
 func (s *Service) Review(ctx context.Context, id string, r Review) (Occurrence, error) {
@@ -216,9 +318,14 @@ func (s *Service) Delete(ctx context.Context, id string) error {
 	if !ok {
 		return ErrNotFound
 	}
-	photo, err := s.Repo.DeleteOccurrence(ctx, id)
+	photos, err := s.Repo.DeleteOccurrence(ctx, id)
 	if err != nil {
 		return err
 	}
-	return s.Photos.Remove(photo)
+	for _, photo := range photos {
+		if err := s.Photos.Remove(photo); err != nil {
+			return err
+		}
+	}
+	return nil
 }

@@ -39,6 +39,8 @@ Bairro em Ação is a mobile web app (interface in Brazilian Portuguese) with a 
 2. **Registrar um ponto**: the big button opens the rear camera. Add a note (or tap a chip such as "Buraco" or "Lixo acumulado") and optionally save the location, which is captured while you type. The photo is re-encoded to 1600 px JPEG before leaving the phone, which also drops EXIF metadata, including any GPS tag.
 3. **Analisar com IA**: a single background worker sends each photo with the note to Gemma 3 4B. Ollama's structured output constrains the answer to a JSON schema with the five categories as an enum. Low confidence becomes `needs_info` with a question for the person.
 4. **Revisar**: each card shows the suggestion prefilled. Confirm it, or change the category, title or description. For `needs_info` the card shows the AI's question; answer it and ask for a new analysis, or fill it in manually.
+   - **Repeated photos are grouped.** A near-identical shot of an earlier point (sent twice, or a burst) joins it as an extra photo, marked "repetida", and **skips the AI**.
+   - **Points that look like the same problem get a suggestion:** same category, taken within 2 minutes, within GPS error of each other, and with similar photos. For example: "Parece o mesmo ponto que o nº 3 — a 11 m e 13 s". **Agrupar** turns them into one point with several photos in the report and on the map; **São diferentes** dismisses it. Every extra photo can be separated or removed.
 5. **Finalizar caminhada**: the GPS route goes to the server along with the end of the walk.
    - The review screen opens with a **map of the route** (Leaflet + OpenStreetMap): a start marker, the distance walked and every photo as a numbered marker in its category color. Tapping a number scrolls to that point.
    - **Zoom:** the mouse wheel or +/- buttons on a computer. On a phone, two fingers, or **Tela cheia** (full screen), where one finger pans; the phone's back button closes it.
@@ -71,6 +73,15 @@ On October 5, 2026 the maintainer walked a neighborhood of Joaçaba with a phone
 | Analysis time | 66–92 s per photo on a GTX 1050 (3 GB), in the background while walking |
 
 Nine photos from one walk are not a benchmark. They show the loop works end to end outdoors: record, analyze, review, report with map. The photos stay on the maintainer's machine and are not in this repository.
+
+### Grouping photos of the same problem
+
+On the walk, one broken sidewalk was photographed three times in 28 seconds (points 3, 4 and 5), which made three report entries. Two approaches were measured on those nine photos before choosing one:
+
+- **Classic image descriptors alone** (color and texture histograms, edge directions, perceptual hash) cannot tell "same sidewalk" from "another grey street surface". The three sidewalk shots scored 0.87–0.93. Cracked asphalt against the sidewalk scored 0.93, and two different asphalt problems 9 m and 22 s apart scored 0.84. No threshold separates them. The perceptual hash does separate exact repeats: every real pair differed by 22 or more of 64 bits.
+- **Gemma 3 4B with the five photos in one request** took 358 s, grouped none of them, and filed the sidewalk under "via pública".
+
+So repeats are caught before the AI by the hash (cheap, reliable). Similar points are only *suggested* when the AI category, time, GPS distance and visual similarity (≥ 0.85) all agree, and the person decides. On this walk that rule suggests exactly 4 → 3 and 5 → 3, and leaves the two asphalt problems apart. Nine photos are not a benchmark, which is why it stays a suggestion.
 
 ### Public test photos
 
@@ -163,6 +174,7 @@ backend/
   internal/store/      PostgreSQL schema and queries (pgx), queue claim with SKIP LOCKED
   internal/ai/         Ollama client, prompt, JSON schema, response validation
   internal/analyzer/   background worker: one photo at a time, retries while Ollama is down
+  internal/similarity/ photo signatures (color, texture, edges, hash) for repeats and grouping hints
   internal/photos/     photo files on disk (database keeps only the name)
   internal/report/     self-contained HTML report with a static route map (tiles + SVG overlay)
   internal/tiles/      map tile fetcher with disk cache (2 parallel requests, 30-day cache)
@@ -214,7 +226,10 @@ The AI result (`ai_*` columns) and the person's confirmation (`category`, `title
 | `PUT /api/walks/{id}/occurrences/{occurrence}` | Multipart: `photo`, `note`, `captured_at`, optional `latitude`, `longitude`, `accuracy_m`; idempotent |
 | `PATCH /api/occurrences/{id}` | Confirm or correct (`category`, `title`, `description`) |
 | `POST /api/occurrences/{id}/analyze` | Queue a new analysis with an updated `note` |
-| `DELETE /api/occurrences/{id}` | Remove a point and its photo |
+| `DELETE /api/occurrences/{id}` | Remove a point with all its photos |
+| `POST /api/occurrences/{id}/group` | Make it an extra photo of the point `with` |
+| `POST /api/occurrences/{id}/ungroup` | Make an extra photo a point of its own again (analyzed if it never was) |
+| `POST /api/occurrences/{id}/keep-separate` | Dismiss a grouping suggestion |
 | `GET /api/photos/{name}` | Photo file |
 | `GET /api/places/neighborhoods/{ibge_code}?city=` | A municipality's neighborhoods from OpenStreetMap, cached in PostgreSQL |
 | `GET /api/walks/{id}/report.html[?download]` | Self-contained report |

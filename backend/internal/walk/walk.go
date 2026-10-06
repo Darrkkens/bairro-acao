@@ -94,6 +94,8 @@ const (
 	AIDone      AIStatus = "done"
 	AINeedsInfo AIStatus = "needs_info" // the photo was not enough; Suggestion.Question says what to add
 	AIFailed    AIStatus = "failed"
+	// AIGrouped marks an extra photo of a point: the point's analysis covers it.
+	AIGrouped AIStatus = "grouped"
 )
 
 // Suggestion is the AI's reading of one occurrence, kept apart from what the
@@ -128,6 +130,24 @@ type Occurrence struct {
 	Title       string     `json:"title"`
 	Description string     `json:"description"`
 	ReviewedAt  *time.Time `json:"reviewed_at"`
+	// GroupID is set on an extra photo of a point and names the point it belongs to.
+	GroupID string `json:"group_id,omitempty"`
+	// Duplicate marks a near-identical shot grouped automatically before analysis.
+	Duplicate bool `json:"duplicate,omitempty"`
+	// SuggestedGroup is computed on read: an earlier point this one probably shows again.
+	SuggestedGroup *GroupSuggestion `json:"suggested_group,omitempty"`
+	// KeepSeparate records that the person said this is a different problem.
+	KeepSeparate bool `json:"-"`
+	// Signature describes the photo for duplicate and similarity checks (internal/similarity).
+	Signature []byte `json:"-"`
+}
+
+// GroupSuggestion explains why two points look like the same problem.
+type GroupSuggestion struct {
+	ID         string  `json:"id"`
+	DistanceM  float64 `json:"distance_m"`
+	Seconds    float64 `json:"seconds"`
+	Similarity float64 `json:"similarity"`
 }
 
 // Review is the person's confirmation or correction of an occurrence.

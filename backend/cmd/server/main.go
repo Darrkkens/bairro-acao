@@ -115,6 +115,9 @@ func run() error {
 	}
 	server := &http.Server{Addr: addr, Handler: handler, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 2 * time.Minute, WriteTimeout: 2 * time.Minute, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 16 << 10}
 
+	// Photos stored before grouping existed get their signature in the background.
+	go walks.BackfillSignatures(ctx)
+
 	workerDone := make(chan struct{})
 	go func() {
 		defer close(workerDone)

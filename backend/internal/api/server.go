@@ -78,6 +78,9 @@ func New(c Config) http.Handler {
 	mux.HandleFunc("PATCH /api/occurrences/{id}", s.review)
 	mux.HandleFunc("POST /api/occurrences/{id}/analyze", s.reanalyze)
 	mux.HandleFunc("DELETE /api/occurrences/{id}", s.deleteOccurrence)
+	mux.HandleFunc("POST /api/occurrences/{id}/group", s.group)
+	mux.HandleFunc("POST /api/occurrences/{id}/ungroup", s.ungroup)
+	mux.HandleFunc("POST /api/occurrences/{id}/keep-separate", s.keepSeparate)
 	mux.HandleFunc("GET /api/photos/{name}", s.photo)
 	mux.HandleFunc("GET /api/places/neighborhoods/{code}", s.listNeighborhoods)
 	return s.middleware(mux)
@@ -398,6 +401,37 @@ func (s *Server) listNeighborhoods(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, list)
+}
+
+// group makes the occurrence an extra photo of the point named in "with".
+func (s *Server) group(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		With string `json:"with"`
+	}
+	if !readJSON(w, r, &req) {
+		return
+	}
+	if err := s.walks.Group(r.Context(), r.PathValue("id"), req.With); err != nil {
+		serviceError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) ungroup(w http.ResponseWriter, r *http.Request) {
+	if err := s.walks.Ungroup(r.Context(), r.PathValue("id")); err != nil {
+		serviceError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) keepSeparate(w http.ResponseWriter, r *http.Request) {
+	if err := s.walks.KeepSeparate(r.Context(), r.PathValue("id")); err != nil {
+		serviceError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *Server) photo(w http.ResponseWriter, r *http.Request) {

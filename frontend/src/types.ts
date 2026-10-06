@@ -1,5 +1,5 @@
 export type CategoryId = 'limpeza' | 'calcadas' | 'via_publica' | 'lazer' | 'outros'
-export type AIStatus = 'pending' | 'running' | 'done' | 'needs_info' | 'failed'
+export type AIStatus = 'pending' | 'running' | 'done' | 'needs_info' | 'failed' | 'grouped'
 
 export interface Walk {
   id: string
@@ -52,6 +52,12 @@ export interface Occurrence {
   title: string
   description: string
   reviewed_at: string | null
+  /** Set on an extra photo of a point: the id of the point it belongs to. */
+  group_id?: string
+  /** A near-identical shot grouped automatically, without analysis. */
+  duplicate?: boolean
+  /** An earlier point this one probably shows again (same category, time, place, similar photo). */
+  suggested_group?: { id: string; distance_m: number; seconds: number; similarity: number }
 }
 
 export interface WalkDetail extends Walk {
