@@ -1,0 +1,29 @@
+name: Bug report
+description: Something does not work as expected
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: What did you expect, and what happened instead?
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: "1. Start a walk in Joaçaba/SC\n2. Record a point without signal\n3. ..."
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Backend log or browser console output
+      description: Remove passwords, coordinates and personal data before pasting.
+      render: text
+  - type: input
+    id: env
+    attributes:
+      label: Environment
+      placeholder: "Phone + browser, or OS; Go/Node versions; Ollama model; commit"

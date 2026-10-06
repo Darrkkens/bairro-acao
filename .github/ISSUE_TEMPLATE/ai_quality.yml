@@ -1,0 +1,28 @@
+name: AI suggestion was wrong
+description: The model picked the wrong category, title or description, or failed to ask for details
+labels: [ai-quality]
+body:
+  - type: markdown
+    attributes:
+      value: Real walks are how the prompt improves. Please do not attach photos that show people's faces, plates or house numbers without consent.
+  - type: dropdown
+    id: model
+    attributes:
+      label: Model
+      options: [gemma3:4b, gemma3:12b, other]
+    validations:
+      required: true
+  - type: textarea
+    id: photo
+    attributes:
+      label: What did the photo show?
+      description: Describe it, or attach it if it shows nothing personal.
+    validations:
+      required: true
+  - type: textarea
+    id: suggestion
+    attributes:
+      label: What did the AI suggest, and what was correct?
+      placeholder: "Suggested: outros / média — 'Placa caída'.\nCorrect: via_publica."
+    validations:
+      required: true

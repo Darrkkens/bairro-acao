@@ -2,6 +2,10 @@
 
 **Walk your neighborhood, photograph what needs fixing, and get an organized report from an open-weight model running on your own computer.** · *Caminhe pelo bairro, registre problemas nos espaços públicos e transforme fotos em um relatório com IA aberta.*
 
+[![CI](https://github.com/Darrkkens/bairro-acao/actions/workflows/ci.yml/badge.svg)](https://github.com/Darrkkens/bairro-acao/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-1f6f4a.svg)](LICENSE)
+[![Hacktoberfest 2026](https://img.shields.io/badge/Hacktoberfest-2026-3D5F58.svg)](https://hacktoberfest.com)
+
 Bairro em Ação is a mobile web app (interface in Brazilian Portuguese) with a Go API, PostgreSQL and **Gemma 3 4B running locally through Ollama**. Its core is the **walk mode**: during the walk you only take a photo, optionally type a word and keep going. The AI reads each photo in the background. When the walk ends, you review the suggestions and share a report with photos, places and descriptions.
 
 | Start | Walking | New point | Route map | Review | Report |
@@ -17,7 +21,7 @@ Bairro em Ação is a mobile web app (interface in Brazilian Portuguese) with a 
 
 ## Contents
 
-[MVP flow](#mvp-flow) · [Why open-source AI](#why-open-source-ai) · [Validation so far](#validation-so-far) · [Quick start](#quick-start) · [Using it on a phone](#using-it-on-a-phone) · [Architecture](#architecture) · [Configuration](#configuration) · [API](#api) · [Privacy and security](#privacy-and-security) · [Tests](#tests) · [Limitations and next steps](#limitations-and-next-steps) · [Credits](#credits)
+[MVP flow](#mvp-flow) · [Why open-source AI](#why-open-source-ai) · [Validation so far](#validation-so-far) · [Quick start](#quick-start) · [Using it on a phone](#using-it-on-a-phone) · [Architecture](#architecture) · [Configuration](#configuration) · [API](#api) · [Privacy and security](#privacy-and-security) · [Tests](#tests) · [Limitations and next steps](#limitations-and-next-steps) · [Contributing](#contributing) · [Hacktoberfest 2026](#hacktoberfest-2026) · [Credits](#credits) · [License](#license)
 
 ## MVP flow
 
@@ -55,7 +59,22 @@ Categories: **Limpeza** (lixo acumulado, descarte irregular) · **Calçadas e ac
 
 ## Validation so far
 
-The plan says quality has to be validated with real photos. As a first check, eight freely licensed street photos from Wikimedia Commons (see [Credits](#credits)) went through the full pipeline with `gemma3:4b`:
+### Taken outside: a real walk in Joaçaba/SC
+
+On October 5, 2026 the maintainer walked a neighborhood of Joaçaba with a phone, using the notebook server mode:
+
+| | |
+| --- | --- |
+| Walk | 7 minutes, about 480 m of GPS route (24 positions) |
+| Points recorded | 9, all with location: potholes, cracked sidewalks, a damaged traffic sign, litter |
+| AI category kept after review | **9 of 9** (all suggested with high confidence) |
+| Analysis time | 66–92 s per photo on a GTX 1050 (3 GB), in the background while walking |
+
+Nine photos from one walk are not a benchmark. They show the loop works end to end outdoors: record, analyze, review, report with map. The photos stay on the maintainer's machine and are not in this repository.
+
+### Public test photos
+
+Before the walk, eight freely licensed street photos from Wikimedia Commons (see [Credits](#credits)) went through the full pipeline with `gemma3:4b`:
 
 | Photo | First pass | After prompt refinement |
 | --- | --- | --- |
@@ -70,11 +89,11 @@ The plan says quality has to be validated with real photos. As a first check, ei
 - **7 of 8** correct on the first pass. The sign was described correctly ("Placa de sinalização caída na esquina") but filed under "Outros". An explicit rule for signs in the prompt fixed it. Since that rule was tuned on this same photo, treat it as a fix, not as evidence of accuracy.
 - Early titles sometimes repeated the neighborhood name ("Calçada rachada na Vila Mariana"). The prompt now forbids that.
 - **Speed:** about 75–120 s per photo on a GTX 1050 with 3 GB VRAM (the model is partly on CPU). This is why analysis runs in the background and the walk never waits for it.
-- **Still to do:** a real walk with phone photos, measuring the "categoria mantida" rate the report prints.
+- **Next:** more walks in different neighborhoods and light conditions, and the same photos through `gemma3:12b` to compare.
 
 ## Quick start
 
-Requirements: Go 1.25+, Node 20+, Docker (for PostgreSQL) and [Ollama](https://ollama.com).
+Requirements: Go 1.25+, Node.js 22+, Docker (for PostgreSQL) and [Ollama](https://ollama.com).
 
 ```bash
 # 1. Local model (once)
@@ -232,6 +251,24 @@ cd ../frontend && npm run build                 # type-check and production buil
 - Public OSM-based services (Nominatim, Photon, Overpass, tiles) have fair-use limits; a group using this heavily should run its own Nominatim/tile server or use a provider.
 - Ideas: duplicate detection across walks, export in the format your city's ombudsman channel accepts.
 
+## Contributing
+
+Issues and pull requests are welcome, in Portuguese or English. Field reports from real walks are especially useful (use the "AI suggestion was wrong" issue template). See [CONTRIBUTING.md](CONTRIBUTING.md) and the [Code of Conduct](CODE_OF_CONDUCT.md). Security issues go through private reporting ([SECURITY.md](SECURITY.md)).
+
+## Hacktoberfest 2026
+
+Bairro em Ação was built for **[Hacktoberfest 2026](https://hacktoberfest.com)**, whose theme is *"AI belongs to everyone"*: building with open-weight models and open-source AI. It is an entry to the DEV **[Hacktoberfest Open-Source AI Challenge: Week 1 — Touch Grass](https://dev.to/challenges/hacktoberfest-week1-2026-10-05)** (tag `#hf26challenge`): open-source AI at the core of something that gets people off the screen and into the world. The project was started on October 5, 2026, inside the challenge window.
+
+- **Open-source AI at the core:** Gemma 3 4B, an open-weight model, reads every photo locally through Ollama. Without it there is no categorization, no titles and no report.
+- **Touch grass:** the app is designed so the phone stays in the pocket. One tap per point, review at home, and it works with no signal.
+- **Best Use of Gemma:** Gemma's vision input and Ollama's structured output turn a photo and a short note into a validated report entry.
+
+In 2026, pull requests no longer count toward Hacktoberfest rewards, so there is no PR quota here. Thoughtful, tested contributions are what we are looking for. The submission checklist is in [docs/hacktoberfest-checklist.md](docs/hacktoberfest-checklist.md).
+
+### AI assistance
+
+Development was assisted by an AI coding assistant (Claude Code), directed, reviewed and field-tested by the maintainer. Validation numbers come from running the real application: the test photos are listed in [Credits](#credits), and the walk above was done outdoors with a phone. Nothing here is presented as real data unless it is.
+
 ## Credits
 
 Photos used for validation and in the screenshots, from Wikimedia Commons:
@@ -244,4 +281,11 @@ Photos used for validation and in the screenshots, from Wikimedia Commons:
 "Lixo na rua" by jmerelo (CC BY-SA 2.0) ·
 "Caminhão de lixo na rua da praça Benedito Calixto" by Ferik80 (CC BY 4.0).
 
-Built with [Gemma 3](https://ai.google.dev/gemma) (Gemma Terms of Use) served by [Ollama](https://ollama.com).
+Built with [Gemma 3](https://ai.google.dev/gemma) served by [Ollama](https://ollama.com). Place data and map tiles: © [OpenStreetMap](https://www.openstreetmap.org/copyright) contributors (ODbL), via Nominatim, Photon and the Overpass API. City lists: [BrasilAPI](https://brasilapi.com.br) and [IBGE](https://servicodados.ibge.gov.br). Maps in the app use [Leaflet](https://leafletjs.com).
+
+## License
+
+The code is released under the [MIT License](LICENSE). Third-party parts keep their own terms:
+- **Gemma model weights:** the [Gemma Terms of Use](https://ai.google.dev/gemma/terms). The model is not distributed here; Ollama downloads it.
+- **OpenStreetMap data:** the [ODbL](https://www.openstreetmap.org/copyright).
+- **Test photos:** the licenses listed above.

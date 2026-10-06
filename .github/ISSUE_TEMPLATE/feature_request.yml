@@ -1,0 +1,22 @@
+name: Feature request
+description: Suggest an idea for the app
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem does it solve?
+      description: Who walks, where, and what gets in their way today?
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: What would you like to happen?
+    validations:
+      required: true
+  - type: textarea
+    id: offline
+    attributes:
+      label: Does it work offline and keep data on the user's machine?
+      description: The app is used outdoors with weak signal, and photos never leave the user's computer.
