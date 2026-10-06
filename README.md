@@ -76,15 +76,21 @@ On October 5, 2026 the maintainer walked a neighborhood of Joaçaba with a phone
 | Walk | 7 minutes, about 480 m of GPS route (24 positions) |
 | Points recorded | 9, all with location: potholes, cracked sidewalks, a damaged traffic sign, litter |
 | AI category kept after review | **9 of 9** (all suggested with high confidence) |
-| Analysis time | 66–92 s per photo on a GTX 1050 (3 GB), in the background while walking |
+| Analysis time | 66–92 s per photo on a GTX 1050 (3 GB). The nine uploads reached the notebook together as the walk ended and were analyzed one after another in about 13 minutes |
 
-Nine photos from one walk are not a benchmark. They show the loop works end to end outdoors: record, analyze, review, report with map. The photos stay on the maintainer's machine and are not in this repository.
+Nine photos from one walk are not a benchmark. They show the loop works end to end outdoors: record, analyze, review, report with map. The photos stay on the maintainer's machine and are not in this repository, except the three shots of one sidewalk shown below (with the location hidden).
 
 ### Filtering and grouping before the AI
 
 Two problems from the real walk motivated a step before Gemma:
 - A profile-picture placeholder sent with the note "Lixo acumulado" came back as *Limpeza, high confidence*: Gemma trusted the note over the photo.
-- One sidewalk photographed three times cost three 80-second analyses.
+- One sidewalk photographed three times in 28 seconds became three points, three 80-second analyses and three differently worded descriptions. The positions were 11 and 20 m apart, closer than the GPS error (±23–31 m).
+
+Points 3–5 of the walk's report before grouping, and the same sidewalk after (location hidden):
+
+![Report excerpt with three separate "Calçada quebrada" points recorded at 17:16, each with its own photo and a differently worded description](docs/field/sidewalk-before.png)
+
+![The same sidewalk after grouping: one point with the main photo and two extra photos](docs/field/sidewalk-after.png)
 
 **What did not work** (measured on the walk's photos):
 - Classic descriptors (color and texture histograms, edge directions) cannot tell one grey street surface from another. Same-sidewalk shots scored 0.87–0.93, and different problems scored up to 0.93.
