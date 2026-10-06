@@ -4,7 +4,9 @@ package store
 import (
 	"bairroacao/internal/walk"
 	"context"
+	"encoding/binary"
 	"errors"
+	"math"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -64,6 +66,8 @@ ALTER TABLE occurrences ADD COLUMN IF NOT EXISTS photo_signature bytea;
 ALTER TABLE occurrences ADD COLUMN IF NOT EXISTS group_id uuid REFERENCES occurrences (id) ON DELETE CASCADE;
 ALTER TABLE occurrences ADD COLUMN IF NOT EXISTS duplicate boolean NOT NULL DEFAULT false;
 ALTER TABLE occurrences ADD COLUMN IF NOT EXISTS keep_separate boolean NOT NULL DEFAULT false;
+-- CLIP vector (512 float32, little-endian) from internal/vision.
+ALTER TABLE occurrences ADD COLUMN IF NOT EXISTS photo_embedding bytea;
 CREATE INDEX IF NOT EXISTS occurrences_group ON occurrences (group_id) WHERE group_id IS NOT NULL;
 ALTER TABLE occurrences DROP CONSTRAINT IF EXISTS occurrences_ai_status_check;
 ALTER TABLE occurrences ADD CONSTRAINT occurrences_ai_status_check CHECK (ai_status IN ('pending', 'running', 'done', 'needs_info', 'failed', 'grouped'));
@@ -191,16 +195,17 @@ func (p *Postgres) SaveNeighborhoodList(ctx context.Context, code string, names 
 const occurrenceColumns = `id::text, walk_id::text, photo, note, latitude, longitude, accuracy_m, captured_at,
 	ai_status, ai_category, ai_title, ai_description, ai_confidence, ai_question, ai_model, ai_error,
 	coalesce(category, ''), title, description, reviewed_at,
-	coalesce(group_id::text, ''), duplicate, keep_separate, photo_signature`
+	coalesce(group_id::text, ''), duplicate, keep_separate, photo_signature, photo_embedding`
 
 func scanOccurrence(row pgx.Row) (walk.Occurrence, error) {
 	var o walk.Occurrence
 	var lat, lng, accuracy *float64
 	var aiCategory, aiTitle, aiDescription, aiConfidence, aiQuestion, aiModel, aiError *string
+	var embedding []byte
 	err := row.Scan(&o.ID, &o.WalkID, &o.Photo, &o.Note, &lat, &lng, &accuracy, &o.CapturedAt,
 		&o.AIStatus, &aiCategory, &aiTitle, &aiDescription, &aiConfidence, &aiQuestion, &aiModel, &aiError,
 		&o.Category, &o.Title, &o.Description, &o.ReviewedAt,
-		&o.GroupID, &o.Duplicate, &o.KeepSeparate, &o.Signature)
+		&o.GroupID, &o.Duplicate, &o.KeepSeparate, &o.Signature, &embedding)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return walk.Occurrence{}, walk.ErrNotFound
 	}
@@ -210,6 +215,7 @@ func scanOccurrence(row pgx.Row) (walk.Occurrence, error) {
 	if lat != nil && lng != nil {
 		o.Location = &walk.Location{Latitude: *lat, Longitude: *lng, Accuracy: accuracy}
 	}
+	o.Embedding = decodeVector(embedding)
 	if aiCategory != nil && (o.AIStatus == walk.AIDone || o.AIStatus == walk.AINeedsInfo || o.AIStatus == walk.AIGrouped) {
 		o.AI = &walk.Suggestion{Category: walk.Category(*aiCategory), Title: deref(aiTitle), Description: deref(aiDescription), Confidence: deref(aiConfidence), Question: deref(aiQuestion), Model: deref(aiModel)}
 	}
@@ -251,9 +257,9 @@ func (p *Postgres) AddOccurrence(ctx context.Context, o walk.Occurrence) (walk.O
 	if status == "" {
 		status = walk.AIPending
 	}
-	created, err := scanOccurrence(p.pool.QueryRow(ctx, `INSERT INTO occurrences (id, walk_id, photo, note, latitude, longitude, accuracy_m, captured_at, ai_status, group_id, duplicate, photo_signature)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) ON CONFLICT (id) DO NOTHING RETURNING `+occurrenceColumns,
-		o.ID, o.WalkID, o.Photo, o.Note, lat, lng, accuracy, o.CapturedAt, string(status), groupID, o.Duplicate, o.Signature))
+	created, err := scanOccurrence(p.pool.QueryRow(ctx, `INSERT INTO occurrences (id, walk_id, photo, note, latitude, longitude, accuracy_m, captured_at, ai_status, group_id, duplicate, photo_signature, photo_embedding)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) ON CONFLICT (id) DO NOTHING RETURNING `+occurrenceColumns,
+		o.ID, o.WalkID, o.Photo, o.Note, lat, lng, accuracy, o.CapturedAt, string(status), groupID, o.Duplicate, o.Signature, encodeVector(o.Embedding)))
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) && pgErr.Code == "23503" {
 		return walk.Occurrence{}, false, walk.ErrNotFound
@@ -318,21 +324,47 @@ func (p *Postgres) KeepSeparate(ctx context.Context, id string) error {
 	return err
 }
 
-func (p *Postgres) MissingSignatures(ctx context.Context) ([]walk.Occurrence, error) {
-	rows, err := p.pool.Query(ctx, `SELECT id::text, photo FROM occurrences WHERE photo_signature IS NULL`)
+func (p *Postgres) MissingFeatures(ctx context.Context, withEmbedding bool) ([]walk.Occurrence, error) {
+	rows, err := p.pool.Query(ctx, `SELECT id::text, photo, photo_signature, photo_embedding FROM occurrences
+		WHERE photo_signature IS NULL OR ($1 AND photo_embedding IS NULL)`, withEmbedding)
 	if err != nil {
 		return nil, err
 	}
 	return pgx.CollectRows(rows, func(row pgx.CollectableRow) (walk.Occurrence, error) {
 		var o walk.Occurrence
-		err := row.Scan(&o.ID, &o.Photo)
+		var embedding []byte
+		err := row.Scan(&o.ID, &o.Photo, &o.Signature, &embedding)
+		o.Embedding = decodeVector(embedding)
 		return o, err
 	})
 }
 
-func (p *Postgres) SaveSignature(ctx context.Context, id string, signature []byte) error {
-	_, err := p.pool.Exec(ctx, `UPDATE occurrences SET photo_signature = $2 WHERE id = $1`, id, signature)
+func (p *Postgres) SaveFeatures(ctx context.Context, id string, signature []byte, embedding []float32) error {
+	_, err := p.pool.Exec(ctx, `UPDATE occurrences SET photo_signature = coalesce($2, photo_signature), photo_embedding = coalesce($3, photo_embedding) WHERE id = $1`,
+		id, signature, encodeVector(embedding))
 	return err
+}
+
+func encodeVector(v []float32) []byte {
+	if len(v) == 0 {
+		return nil
+	}
+	out := make([]byte, 0, 4*len(v))
+	for _, x := range v {
+		out = binary.LittleEndian.AppendUint32(out, math.Float32bits(x))
+	}
+	return out
+}
+
+func decodeVector(b []byte) []float32 {
+	if len(b) == 0 || len(b)%4 != 0 {
+		return nil
+	}
+	v := make([]float32, len(b)/4)
+	for i := range v {
+		v[i] = math.Float32frombits(binary.LittleEndian.Uint32(b[4*i:]))
+	}
+	return v
 }
 
 // ClaimNext marks the oldest pending occurrence as running. SKIP LOCKED keeps

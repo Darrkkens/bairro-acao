@@ -3,10 +3,11 @@ import { api } from '../api'
 import { Autocomplete, type Results } from '../components/Autocomplete'
 import { CaptureButton } from '../components/CaptureButton'
 import { AIChip, Spinner } from '../components/Status'
-import { formatClock, formatShortDate, plural } from '../format'
+import { formatClock, formatShortDate, formatTime, plural } from '../format'
 import { formatDistance, locate } from '../geo'
 import { useNow, useObjectURL, useOnline, useWalkDetail } from '../hooks'
 import { CameraIcon, PinIcon, RetryIcon } from '../icons'
+import { useDiscarded } from '../discarded'
 import { discard, useOutbox, type Op } from '../outbox'
 import { confirmCity, DEFAULT_PLACE, listNeighborhoods, matchesWords, normalize, reverseGeocode, searchCities, searchNeighborhoods, STATES, type City, type Neighborhood, type Place } from '../places'
 import type { GpsState } from '../track'
@@ -473,6 +474,7 @@ const gpsText: Partial<Record<GpsState, string>> = {
 
 function ActiveWalk({ walk, tracker, onPhoto, onFinish }: { walk: Walk; tracker: Props['tracker']; onPhoto: Props['onPhoto']; onFinish: Props['onFinish'] }) {
   const ops = useOutbox()
+  const [discarded, dismissDiscarded] = useDiscarded(walk.id)
   const { data } = useWalkDetail(walk.id)
   const now = useNow()
   const online = useOnline()
@@ -525,6 +527,21 @@ function ActiveWalk({ walk, tracker, onPhoto, onFinish }: { walk: Walk; tracker:
         <span>Registrar ponto</span>
       </CaptureButton>
       <p className="hint">Foto, uma palavra se quiser, e siga caminhando. A IA analisa em segundo plano e você revisa tudo no final, com o mapa do trajeto.</p>
+
+      {discarded.length > 0 && (
+        <ul className="discarded" aria-label="Fotos descartadas">
+          {discarded.map((d) => (
+            <li key={d.id} role="status">
+              <p>
+                <strong>Foto descartada às {formatTime(d.at)}:</strong> parece {d.looks}, não um problema em espaço público. Tire outra foto se quiser registrar o ponto.
+              </p>
+              <button className="button ghost small" onClick={() => dismissDiscarded(d.id)}>
+                Ok
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
 
       {points.length > 0 && (
         <ol className="points" aria-label="Pontos desta caminhada">

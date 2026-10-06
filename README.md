@@ -17,6 +17,7 @@ Bairro em Ação is a mobile web app (interface in Brazilian Portuguese) with a 
 - **Photos stay on hardware you control.** The model runs in Ollama on your machine; no cloud AI, no API key, no per-photo cost.
 - **Finds where you are.** Neighborhood, city and state are filled in from the phone's location using open data (OpenStreetMap and BrasilAPI). If the neighborhood can't be found, the app asks you to type it.
 - **A map of the walk.** The route is recorded while the app is open. At the end, the photographed points are numbered on the map, both in the app and in the report.
+- **Two open models, each doing what it is good at.** CLIP (open, about 0.3 s per photo) runs first on every upload. It discards photos that show nothing to report (a car, a pet, a profile picture) and groups repeated shots of one problem. Gemma (about 80 s per photo) then analyzes each remaining point once.
 - **AI suggests, people decide.** Gemma proposes a category, title and description, and asks for a description when the photo is not enough. The report includes only points a person confirmed.
 
 ## Contents
@@ -37,11 +38,15 @@ Bairro em Ação is a mobile web app (interface in Brazilian Portuguese) with a 
    - Typing a neighborhood with no city chosen searches Brazil-wide with [Photon](https://photon.komoot.io), an open-source geocoder over OpenStreetMap built for search-as-you-type. Picking a result fills its city and UF.
    - The walk is created on the phone (client-side UUID), so it starts even without signal.
 2. **Registrar um ponto**: the big button opens the rear camera. Add a note (or tap a chip such as "Buraco" or "Lixo acumulado") and optionally save the location, which is captured while you type. The photo is re-encoded to 1600 px JPEG before leaving the phone, which also drops EXIF metadata, including any GPS tag.
-3. **Analisar com IA**: a single background worker sends each photo with the note to Gemma 3 4B. Ollama's structured output constrains the answer to a JSON schema with the five categories as an enum. Low confidence becomes `needs_info` with a question for the person.
-4. **Revisar**: each card shows the suggestion prefilled. Confirm it, or change the category, title or description. For `needs_info` the card shows the AI's question; answer it and ask for a new analysis, or fill it in manually.
+3. **Filtrar antes da IA**: on upload, the server describes the photo with CLIP ([`internal/vision`](backend/internal/vision)) and decides in a fraction of a second:
+   - **Off-topic → discarded.** A photo closer to "a car", "a selfie", "a profile avatar", "food"… than to any problem the app reports is not stored and never reaches Gemma. The phone shows "Foto descartada: parece um carro…" so the person can retake it.
+   - **Another shot of the same spot → grouped.** A photo taken within 2 minutes, within GPS error of an earlier point, and similar to it both for CLIP and for the classic signature joins that point as an extra photo, without its own analysis. Exact repeats are caught by a perceptual hash even without the model.
+   - **Anything else → queued for Gemma.**
+4. **Analisar com IA**: a single background worker sends each photo with the note to Gemma 3 4B. Ollama's structured output constrains the answer to a JSON schema with the five categories as an enum. Low confidence becomes `needs_info` with a question for the person.
+5. **Revisar**: each card shows the suggestion prefilled. Confirm it, or change the category, title or description. For `needs_info` the card shows the AI's question; answer it and ask for a new analysis, or fill it in manually.
    - **Repeated photos are grouped.** A near-identical shot of an earlier point (sent twice, or a burst) joins it as an extra photo, marked "repetida", and **skips the AI**.
    - **Points that look like the same problem get a suggestion:** same category, taken within 2 minutes, within GPS error of each other, and with similar photos. For example: "Parece o mesmo ponto que o nº 3 — a 11 m e 13 s". **Agrupar** turns them into one point with several photos in the report and on the map; **São diferentes** dismisses it. Every extra photo can be separated or removed.
-5. **Finalizar caminhada**: the GPS route goes to the server along with the end of the walk.
+6. **Finalizar caminhada**: the GPS route goes to the server along with the end of the walk.
    - The review screen opens with a **map of the route** (Leaflet + OpenStreetMap): a start marker, the distance walked and every photo as a numbered marker in its category color. Tapping a number scrolls to that point.
    - **Zoom:** the mouse wheel or +/- buttons on a computer. On a phone, two fingers, or **Tela cheia** (full screen), where one finger pans; the phone's back button closes it.
    - Photos taken at nearly the same spot are **fanned out around it with a line to the real location**, so every number stays visible at any zoom.
@@ -57,6 +62,7 @@ Categories: **Limpeza** (lixo acumulado, descarte irregular) · **Calçadas e ac
 - **Free to run at neighborhood scale.** A residents' association can analyze hundreds of photos without per-image fees or quotas.
 - **Swappable and measurable.** `OLLAMA_MODEL=gemma3:12b` switches models without code changes. Each suggestion stores the model that produced it, and the AI suggestion is kept apart from the confirmed values, so the report can say how often reviewers kept the AI's category. That makes it possible to compare models on your own photos.
 - **Open data all the way.** Places come from OpenStreetMap and BrasilAPI (IBGE), and maps from OpenStreetMap tiles. Each is replaceable: `MAP_TILES_URL` points the report at your own tile server.
+- **Open models cooperate.** A small open vision model (CLIP) filters and groups in a fraction of a second; the larger open model (Gemma) writes the report. Neither needs a network connection or an account.
 - **Changeable behavior.** The prompt (`backend/internal/ai/prompt.go`) and the categories are plain code you can edit for your city.
 
 ## Validation so far
@@ -74,14 +80,41 @@ On October 5, 2026 the maintainer walked a neighborhood of Joaçaba with a phone
 
 Nine photos from one walk are not a benchmark. They show the loop works end to end outdoors: record, analyze, review, report with map. The photos stay on the maintainer's machine and are not in this repository.
 
-### Grouping photos of the same problem
+### Filtering and grouping before the AI
 
-On the walk, one broken sidewalk was photographed three times in 28 seconds (points 3, 4 and 5), which made three report entries. Two approaches were measured on those nine photos before choosing one:
+Two problems from the real walk motivated a step before Gemma:
+- A profile-picture placeholder sent with the note "Lixo acumulado" came back as *Limpeza, high confidence*: Gemma trusted the note over the photo.
+- One sidewalk photographed three times cost three 80-second analyses.
 
-- **Classic image descriptors alone** (color and texture histograms, edge directions, perceptual hash) cannot tell "same sidewalk" from "another grey street surface". The three sidewalk shots scored 0.87–0.93. Cracked asphalt against the sidewalk scored 0.93, and two different asphalt problems 9 m and 22 s apart scored 0.84. No threshold separates them. The perceptual hash does separate exact repeats: every real pair differed by 22 or more of 64 bits.
-- **Gemma 3 4B with the five photos in one request** took 358 s, grouped none of them, and filed the sidewalk under "via pública".
+**What did not work** (measured on the walk's photos):
+- Classic descriptors (color and texture histograms, edge directions) cannot tell one grey street surface from another. Same-sidewalk shots scored 0.87–0.93, and different problems scored up to 0.93.
+- Gemma 3 4B comparing five photos in one request took 358 s and grouped none.
 
-So repeats are caught before the AI by the hash (cheap, reliable). Similar points are only *suggested* when the AI category, time, GPS distance and visual similarity (≥ 0.85) all agree, and the person decides. On this walk that rule suggests exactly 4 → 3 and 5 → 3, and leaves the two asphalt problems apart. Nine photos are not a benchmark, which is why it stays a suggestion.
+**What works:** CLIP ViT-B/32, an open image model (OpenAI, MIT license), run locally with ONNX Runtime in the Go backend (about 0.3 s per photo on this notebook's CPU).
+
+*Filter* (zero-shot: the photo is compared with 20 descriptions of problems and 17 of off-topic things; threshold 0.2):
+
+| Set | Kept |
+| --- | --- |
+| The real walk | **9 / 9** |
+| Problem photos from Wikimedia Commons | **8 / 8** |
+| Reference photos: rubbish piles, discarded furniture, damaged signs | **90 / 90** |
+| Reference photos: graffiti | **28 / 30**: the two dropped are classrooms photographed indoors |
+| Off-topic photos (avatar, car, house facade, portrait, selfie, pet, food, screenshot, document, room, sky, flower, laptop, party, painting) | **2 / 17** kept |
+
+The two off-topic photos that pass are street scenes with no visible problem (a car park, an empty suburban street). That is on purpose: a discarded photo is deleted, so doubt is left to Gemma, which asks the person for details.
+
+*Grouping* (only pairs within 2 minutes and GPS error are compared; both similarities must reach 0.85):
+
+| Pair from the walk | CLIP | Signature | |
+| --- | --- | --- | --- |
+| 3–4, same sidewalk (13 s, 11 m) | 0.91 | 0.88 | grouped ✓ |
+| 3–5, same sidewalk (28 s, 20 m) | 0.89 | 0.87 | grouped ✓ |
+| 1–2, cracked asphalt vs. a patched drain (22 s, 9 m) | 0.76 | 0.84 | kept apart ✓ |
+
+End to end, a phone walk with six uploads (the avatar, three shots of the sidewalk, the asphalt, a cat) produced **2 points and 2 discards**, so **2 Gemma analyses instead of 6**. Grouped photos can still be separated in review, and points the filter did not group but that look alike still get a "same point?" suggestion after the AI.
+
+The reference photos come from a public Roboflow Universe project (COS40007 Rubbish & Road Issues, marked CC BY 4.0). Some of its images seem to come from stock and news sites, so they are used only locally to evaluate the filter. They are **not** in this repository and not used by the filter at runtime: as a nearest-neighbor signal they made results worse (the avatar looked closer to them than some real photos).
 
 ### Public test photos
 
@@ -121,6 +154,8 @@ cd backend && go run ./cmd/server # http://127.0.0.1:8090
 # 4. Frontend (another terminal)
 cd frontend && npm install && npm run dev   # http://localhost:5174
 ```
+
+Optional, for the photo filter (about 110 MB): `./scripts/baixar-modelo-visao.sh`. The backend uses CGO for ONNX Runtime, so building needs a C compiler (gcc). Without the model files the app runs unfiltered.
 
 The backend reads `./.env` or `../.env` on start. If Ollama is down, points wait in the queue and are analyzed when it comes back; the review screen says so and offers manual filling.
 
@@ -175,6 +210,7 @@ backend/
   internal/ai/         Ollama client, prompt, JSON schema, response validation
   internal/analyzer/   background worker: one photo at a time, retries while Ollama is down
   internal/similarity/ photo signatures (color, texture, edges, hash) for repeats and grouping hints
+  internal/vision/     CLIP via ONNX Runtime: off-topic filter (labels.json) and embeddings for grouping
   internal/photos/     photo files on disk (database keeps only the name)
   internal/report/     self-contained HTML report with a static route map (tiles + SVG overlay)
   internal/tiles/      map tile fetcher with disk cache (2 parallel requests, 30-day cache)
@@ -204,6 +240,7 @@ The AI result (`ai_*` columns) and the person's confirmation (`category`, `title
 | `REPORT_TIMEZONE` | `America/Sao_Paulo` | Time zone for dates in the downloaded report |
 | `OVERPASS_URLS` | overpass-api.de, maps.mail.ru, overpass.private.coffee | Overpass servers tried in order for neighborhood lists |
 | `VITE_DEFAULT_CITY` / `VITE_DEFAULT_STATE` (frontend) | `Joaçaba` / `SC` | City every walk starts with |
+| `VISION` / `VISION_DIR` | `on` / `data/vision` | Photo filter with CLIP; `off` disables it. Files from `scripts/baixar-modelo-visao.sh` |
 | `MAP_TILES_URL` | `https://tile.openstreetmap.org/{z}/{x}/{y}.png` | Tiles for the report's static map; `off` draws only the route |
 | `MAP_TILES_ATTRIBUTION` | `© OpenStreetMap contributors` | Credit printed under the report map |
 | `TILE_CACHE_DIR` | `data/tiles` | Tile cache, relative to where the backend runs |
@@ -302,5 +339,6 @@ Built with [Gemma 3](https://ai.google.dev/gemma) served by [Ollama](https://oll
 
 The code is released under the [MIT License](LICENSE). Third-party parts keep their own terms:
 - **Gemma model weights:** the [Gemma Terms of Use](https://ai.google.dev/gemma/terms). The model is not distributed here; Ollama downloads it.
+- **CLIP ViT-B/32** (OpenAI, MIT) as the ONNX export `Xenova/clip-vit-base-patch32`, and **ONNX Runtime** (Microsoft, MIT): downloaded by `scripts/baixar-modelo-visao.sh`, not distributed here. `backend/internal/vision/labels.json` holds CLIP text embeddings of this project's own descriptions (`scripts/clip-labels.mjs`).
 - **OpenStreetMap data:** the [ODbL](https://www.openstreetmap.org/copyright).
 - **Test photos:** the licenses listed above.

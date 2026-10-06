@@ -856,6 +856,25 @@ p.detect {
   max-width: 100%;
 }
 
+.discarded {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 8px;
+}
+
+.discarded li {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border-radius: var(--radius);
+  background: var(--warn-soft);
+  font-size: 14px;
+}
+
 .finish-bar {
   position: sticky;
   bottom: 0;

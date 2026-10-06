@@ -2,6 +2,7 @@ package walk
 
 import (
 	"bairroacao/internal/similarity"
+	"math"
 	"testing"
 	"time"
 )
@@ -71,5 +72,42 @@ func TestDuplicateOfIgnoresExtraPhotosAndOldShots(t *testing.T) {
 	}
 	if id, ok := duplicateOf(photo, t0, existing); !ok || id != "point" {
 		t.Fatalf("got %q %v", id, ok)
+	}
+}
+
+func TestSameSceneNeedsTimePlaceAndBothSimilarities(t *testing.T) {
+	t0 := time.Date(2026, 10, 5, 20, 16, 0, 0, time.UTC)
+	unit := func(x float32) []float32 {
+		v := make([]float32, 4)
+		v[0] = x
+		v[1] = float32(math.Sqrt(float64(1 - x*x)))
+		return v
+	}
+	sidewalk := Occurrence{ID: "a", CapturedAt: t0, Location: at(-27.16776, -51.51792, 23), Signature: sig(t, "sidewalk"), Embedding: unit(1)}
+	extra := Occurrence{ID: "x", GroupID: "a", CapturedAt: t0.Add(5 * time.Second), Location: at(-27.16776, -51.51792, 23), Signature: sig(t, "sidewalk"), Embedding: unit(1)}
+	cases := []struct {
+		name string
+		o    Occurrence
+		want string
+	}{
+		{"another shot of the same sidewalk", Occurrence{CapturedAt: t0.Add(13 * time.Second), Location: at(-27.16773, -51.51782, 24), Signature: sig(t, "sidewalk-other-angle"), Embedding: unit(0.9)}, "a"},
+		{"CLIP says a different scene", Occurrence{CapturedAt: t0.Add(13 * time.Second), Location: at(-27.16773, -51.51782, 24), Signature: sig(t, "sidewalk-other-angle"), Embedding: unit(0.76)}, ""},
+		{"signature says a different surface", Occurrence{CapturedAt: t0.Add(13 * time.Second), Location: at(-27.16773, -51.51782, 24), Signature: sig(t, "asphalt"), Embedding: unit(0.95)}, ""},
+		{"too far away", Occurrence{CapturedAt: t0.Add(13 * time.Second), Location: at(-27.16706, -51.51792, 10), Signature: sig(t, "sidewalk"), Embedding: unit(1)}, ""},
+		{"too late", Occurrence{CapturedAt: t0.Add(3 * time.Minute), Location: at(-27.16776, -51.51792, 23), Signature: sig(t, "sidewalk"), Embedding: unit(1)}, ""},
+		{"no location needs a near-identical quick repeat", Occurrence{CapturedAt: t0.Add(30 * time.Second), Signature: sig(t, "sidewalk"), Embedding: unit(0.99)}, "a"},
+		{"no model, no automatic grouping", Occurrence{CapturedAt: t0.Add(13 * time.Second), Location: at(-27.16773, -51.51782, 24), Signature: sig(t, "sidewalk")}, ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got, ok := sameScene(c.o, []Occurrence{sidewalk, extra})
+			if got != c.want || ok != (c.want != "") {
+				t.Fatalf("got %q %v, want %q", got, ok, c.want)
+			}
+		})
+	}
+	// Matching an extra photo groups with its point, not with the extra.
+	if got, _ := sameScene(Occurrence{CapturedAt: t0.Add(10 * time.Second), Location: at(-27.16776, -51.51792, 23), Signature: sig(t, "sidewalk"), Embedding: unit(1)}, []Occurrence{extra}); got != "a" {
+		t.Errorf("got %q, want the point a", got)
 	}
 }

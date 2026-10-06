@@ -15,6 +15,9 @@ if ! curl -sf http://localhost:11434/api/tags >/dev/null; then
   sleep 3
 fi
 
+# Filtro de fotos (CLIP): baixa uma vez; se falhar, o app segue sem filtro.
+./scripts/baixar-modelo-visao.sh || echo "Aviso: filtro de fotos indisponível; seguindo sem ele."
+
 echo "Gerando o app…"
 (cd frontend && npm run build --silent >/dev/null)
 (cd backend && go build -o server ./cmd/server)

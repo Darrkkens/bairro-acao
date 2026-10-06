@@ -12,13 +12,20 @@ import (
 // alike to cheap descriptors, so similarity alone never groups points; it only
 // backs up the same category, time and place, and the person always decides.
 const (
-	duplicateWindow    = 10 * time.Minute
-	suggestWindow      = 2 * time.Minute
-	suggestSimilarity  = 0.85
-	minRadiusM         = 15.0
-	maxRadiusM         = 40.0
-	noLocationWindow   = time.Minute
-	noLocationMinScore = 0.9
+	duplicateWindow = 10 * time.Minute
+	// Automatic grouping before analysis needs the image model and both
+	// similarities. On the walk, same-sidewalk shots scored CLIP 0.89–0.91 and
+	// signature 0.87–0.88; two different asphalt problems 9 m apart scored
+	// CLIP 0.76.
+	sceneClip           = 0.85
+	sceneSignature      = 0.85
+	sceneNoLocationClip = 0.92
+	suggestWindow       = 2 * time.Minute
+	suggestSimilarity   = 0.85
+	minRadiusM          = 15.0
+	maxRadiusM          = 40.0
+	noLocationWindow    = time.Minute
+	noLocationMinScore  = 0.9
 )
 
 func signatureOf(o Occurrence) (similarity.Signature, bool) {
@@ -41,6 +48,45 @@ func duplicateOf(sig similarity.Signature, capturedAt time.Time, existing []Occu
 		}
 	}
 	return "", false
+}
+
+// sameScene finds the point a new photo shows again: taken within two minutes,
+// within GPS error, and similar both to CLIP and to the classic signature.
+// Without location, only a quick and very similar repeat counts.
+func sameScene(o Occurrence, existing []Occurrence) (string, bool) {
+	sig, ok := signatureOf(o)
+	if !ok || len(o.Embedding) == 0 {
+		return "", false
+	}
+	for _, p := range existing {
+		other, ok := signatureOf(p)
+		gap := absDuration(o.CapturedAt.Sub(p.CapturedAt))
+		if !ok || len(p.Embedding) != len(o.Embedding) || gap > suggestWindow {
+			continue
+		}
+		clip := cosine(o.Embedding, p.Embedding)
+		visual := similarity.Compare(sig, other).Overall
+		distance, located := pointDistance(o, p)
+		same := located && distance <= radius(o, p) && clip >= sceneClip && visual >= sceneSignature
+		if !located {
+			same = gap <= noLocationWindow && clip >= sceneNoLocationClip && visual >= noLocationMinScore
+		}
+		if same {
+			if p.GroupID != "" {
+				return p.GroupID, true
+			}
+			return p.ID, true
+		}
+	}
+	return "", false
+}
+
+func cosine(a, b []float32) float64 {
+	var s float64
+	for i := range a {
+		s += float64(a[i]) * float64(b[i])
+	}
+	return s
 }
 
 // effectiveCategory is what the person confirmed, or else what the AI suggested.

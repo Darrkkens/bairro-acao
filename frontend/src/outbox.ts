@@ -3,8 +3,9 @@
 // and is sent in order whenever the server answers. The server accepts the same
 // ID twice, so a retry after a dropped response is harmless.
 import { useEffect, useState } from 'react'
-import { api, ApiError } from './api'
+import { api, ApiError, isDiscarded } from './api'
 import { withStore } from './db'
+import { rememberDiscarded } from './discarded'
 import type { LocalOccurrence, TrackPoint, Walk } from './types'
 
 type Payload =
@@ -56,7 +57,11 @@ async function drain() {
   for (const op of await list()) {
     if (op.error) continue
     try {
-      await send(op)
+      const result = await send(op)
+      if (op.kind === 'occurrence' && isDiscarded(result)) {
+        const { id, walk_id, captured_at, note } = op.occurrence
+        rememberDiscarded(walk_id, { id, at: captured_at, looks: result.looks, note })
+      }
       await tx('readwrite', (s) => s.delete(op.seq))
     } catch (e) {
       if (e instanceof ApiError && !e.retryable) {

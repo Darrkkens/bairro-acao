@@ -30,6 +30,20 @@ func (aiStub) Healthy(context.Context) bool { return true }
 
 // newServer runs against TEST_DATABASE_URL inside a throwaway schema.
 func newServer(t *testing.T) (http.Handler, *store.Postgres, *int) {
+	return newServerWithVision(t, nil)
+}
+
+// visionStub answers like the image model, keyed by the photo bytes.
+type visionStub map[string]walk.Inspection
+
+func (v visionStub) Inspect(photo []byte) (walk.Inspection, error) {
+	if got, ok := v[string(photo)]; ok {
+		return got, nil
+	}
+	return walk.Inspection{Relevant: true, Embedding: []float32{1, 0, 0}}, nil
+}
+
+func newServerWithVision(t *testing.T, vision walk.Inspector) (http.Handler, *store.Postgres, *int) {
 	t.Helper()
 	url := os.Getenv("TEST_DATABASE_URL")
 	if url == "" {
@@ -63,6 +77,9 @@ func newServer(t *testing.T) (http.Handler, *store.Postgres, *int) {
 	}
 	wakes := new(int)
 	service := &walk.Service{Repo: db, Photos: dir, Wake: func() { *wakes++ }}
+	if vision != nil {
+		service.Vision = vision
+	}
 	return New(Config{Walks: service, Photos: dir, AI: aiStub{}, Database: db, Location: time.UTC}), db, wakes
 }
 
@@ -200,12 +217,15 @@ func TestRejectsBadInput(t *testing.T) {
 	}
 }
 
-func testJPEG(t *testing.T, seed int) []byte {
+func testJPEG(t *testing.T, seed int) []byte { return testJPEGShifted(t, seed, 0) }
+
+// testJPEGShifted draws the same pattern moved sideways: a similar but not identical photo.
+func testJPEGShifted(t *testing.T, seed, shift int) []byte {
 	t.Helper()
 	img := image.NewRGBA(image.Rect(0, 0, 320, 240))
 	for y := range 240 {
 		for x := range 320 {
-			v := uint8((x*seed + y*7) % 200)
+			v := uint8(((x+shift)*seed + y*7) % 200)
 			img.Set(x, y, color.RGBA{v, uint8(255 - v), uint8(seed * 30), 255})
 		}
 	}
@@ -286,5 +306,53 @@ func TestRepeatedPhotoIsGroupedWithoutAnalysis(t *testing.T) {
 		if rec := do(t, h, http.MethodGet, "/api/photos/"+id+".jpg", "", nil); rec.Code != http.StatusNotFound {
 			t.Errorf("photo %s still served after delete: %d", id, rec.Code)
 		}
+	}
+}
+
+func TestImageModelDiscardsAndGroupsBeforeAnalysis(t *testing.T) {
+	// Another shot of the same spot: a similar picture, not the same file (that would be a repeat).
+	avatar, sidewalk, sidewalkAgain, elsewhere := testJPEG(t, 1), testJPEG(t, 2), testJPEGShifted(t, 2, 37), testJPEGShifted(t, 2, 71)
+	stub := visionStub{
+		string(avatar):        {Relevant: false, Looks: "um avatar ou ícone", Problem: 0.01},
+		string(sidewalk):      {Relevant: true, Embedding: []float32{1, 0, 0}},
+		string(sidewalkAgain): {Relevant: true, Embedding: []float32{0.95, 0.312, 0}},
+		string(elsewhere):     {Relevant: true, Embedding: []float32{0.95, 0.312, 0}},
+	}
+	h, _, wakes := newServerWithVision(t, stub)
+	walkID := "8c1d2e3f-4a5b-4c6d-8e7f-9a0b1c2d3e4f"
+	now := time.Now().UTC()
+	start := `{"neighborhood":"Frei Bruno","city":"Joaçaba","state":"SC","started_at":"` + now.Format(time.RFC3339) + `"}`
+	if rec := do(t, h, http.MethodPut, "/api/walks/"+walkID, "application/json", strings.NewReader(start)); rec.Code != http.StatusCreated {
+		t.Fatalf("walk: %d", rec.Code)
+	}
+	at := func(seconds int, lat string) map[string]string {
+		return map[string]string{"note": "Lixo acumulado", "captured_at": now.Add(time.Duration(seconds) * time.Second).Format(time.RFC3339), "latitude": lat, "longitude": "-51.51792", "accuracy_m": "20"}
+	}
+
+	rec := upload(t, h, walkID, "aaaaaaaa-0000-4000-8000-000000000001", avatar, at(0, "-27.16776"))
+	var discarded struct {
+		Discarded bool   `json:"discarded"`
+		Looks     string `json:"looks"`
+	}
+	if rec.Code != http.StatusOK || json.Unmarshal(rec.Body.Bytes(), &discarded) != nil || !discarded.Discarded || discarded.Looks != "um avatar ou ícone" || *wakes != 0 {
+		t.Fatalf("avatar: %d %s, wakes %d", rec.Code, rec.Body, *wakes)
+	}
+	if rec := do(t, h, http.MethodGet, "/api/photos/aaaaaaaa-0000-4000-8000-000000000001.jpg", "", nil); rec.Code != http.StatusNotFound {
+		t.Fatalf("a discarded photo must not be stored: %d", rec.Code)
+	}
+
+	first := "aaaaaaaa-0000-4000-8000-000000000002"
+	if rec := upload(t, h, walkID, first, sidewalk, at(0, "-27.16776")); rec.Code != http.StatusCreated || *wakes != 1 {
+		t.Fatalf("first: %d wakes %d", rec.Code, *wakes)
+	}
+	var again walk.Occurrence
+	rec = upload(t, h, walkID, "aaaaaaaa-0000-4000-8000-000000000003", sidewalkAgain, at(13, "-27.16773"))
+	if json.Unmarshal(rec.Body.Bytes(), &again) != nil || again.GroupID != first || again.AIStatus != walk.AIGrouped || again.Duplicate || *wakes != 1 {
+		t.Fatalf("another shot of the same spot must join it without analysis: %+v, wakes %d", again, *wakes)
+	}
+	var far walk.Occurrence
+	rec = upload(t, h, walkID, "aaaaaaaa-0000-4000-8000-000000000004", elsewhere, at(20, "-27.16700"))
+	if json.Unmarshal(rec.Body.Bytes(), &far) != nil || far.GroupID != "" || far.AIStatus != walk.AIPending || *wakes != 2 {
+		t.Fatalf("a similar photo 85 m away is its own point: %+v, wakes %d", far, *wakes)
 	}
 }

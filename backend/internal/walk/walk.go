@@ -140,6 +140,29 @@ type Occurrence struct {
 	KeepSeparate bool `json:"-"`
 	// Signature describes the photo for duplicate and similarity checks (internal/similarity).
 	Signature []byte `json:"-"`
+	// Embedding is the photo's CLIP vector (internal/vision), when the model is set up.
+	Embedding []float32 `json:"-"`
+}
+
+// Inspection is what the image model says about an upload before Gemma sees it.
+type Inspection struct {
+	Embedding []float32
+	// Relevant is false for photos that show nothing the app reports (a car, a profile picture).
+	Relevant bool
+	Problem  float64
+	// Looks is the closest description in Portuguese, e.g. "um carro".
+	Looks string
+}
+
+// DiscardedError rejects an upload that shows nothing the app reports. The
+// photo is not stored and never reaches Gemma.
+type DiscardedError struct {
+	Looks   string
+	Problem float64
+}
+
+func (e *DiscardedError) Error() string {
+	return "Foto descartada: parece " + e.Looks + ", não um problema em espaço público."
 }
 
 // GroupSuggestion explains why two points look like the same problem.

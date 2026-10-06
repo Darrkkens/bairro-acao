@@ -151,7 +151,11 @@ func readJSONLimit(w http.ResponseWriter, r *http.Request, v any, limit int64) b
 
 func serviceError(w http.ResponseWriter, err error) {
 	var invalid *walk.ValidationError
+	var discarded *walk.DiscardedError
 	switch {
+	case errors.As(err, &discarded):
+		// Not a failure: the upload was received and judged off-topic, so the app stops retrying.
+		writeJSON(w, http.StatusOK, map[string]any{"discarded": true, "looks": discarded.Looks, "message": discarded.Error()})
 	case errors.As(err, &invalid):
 		fail(w, http.StatusBadRequest, invalid.Message)
 	case errors.Is(err, walk.ErrNotFound), errors.Is(err, photos.ErrNotFound):
@@ -177,7 +181,7 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	if !database {
 		status = http.StatusServiceUnavailable
 	}
-	writeJSON(w, status, map[string]any{"database": database, "ai": map[string]any{"model": s.ai.Model(), "available": s.ai.Healthy(r.Context())}})
+	writeJSON(w, status, map[string]any{"database": database, "ai": map[string]any{"model": s.ai.Model(), "available": s.ai.Healthy(r.Context())}, "photo_filter": s.walks.Vision != nil})
 }
 
 func (s *Server) categories(w http.ResponseWriter, r *http.Request) {
